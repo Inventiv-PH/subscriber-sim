@@ -165,6 +165,10 @@ RE_AD_MARKER = re.compile(r"#ad", re.IGNORECASE)
 RE_OF_URL = re.compile(r"onlyfans\.com/", re.IGNORECASE)
 RE_DURATION = re.compile(r"^-?\d{2}:\d{2}$")
 
+RE_URL = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)
+RE_MULTI_NEWLINE = re.compile(r"\n{3,}")
+RE_PUNCT_ONLY = re.compile(r"^[\s\W]+$")
+
 UI_ARTIFACTS = {"Report", "View message", "Pin the message",
                 "Drop files to upload", "Send", "|"}
 
@@ -671,9 +675,10 @@ def split_into_sessions(
     if not messages:
         return []
 
-    # Filter out noise and leaked labels
+    # Filter out noise, leaked labels, and normalize text
     messages = filter_noise(messages)
     messages = strip_subscriber_labels(messages)
+    messages = normalize_messages(messages)
 
     if len(messages) < 3:
         return []
@@ -772,6 +777,58 @@ def strip_subscriber_labels(messages: list[dict]) -> list[dict]:
     ]
 
 
+def _collapse_repeated_chars(text: str) -> str:
+    """Collapse 3+ repeated identical characters/emoji to 2."""
+    result = []
+    i = 0
+    while i < len(text):
+        char = text[i]
+        count = 1
+        while i + count < len(text) and text[i + count] == char:
+            count += 1
+        result.append(char * min(count, 2))
+        i += count
+    return "".join(result)
+
+
+def normalize_message(content: str) -> str | None:
+    """Normalize a single message. Returns None if message should be dropped."""
+    # Strip whitespace
+    content = content.strip()
+    if not content:
+        return None
+
+    # Strip URLs
+    content = RE_URL.sub("", content).strip()
+    if not content:
+        return None
+
+    # Collapse 3+ newlines to 2
+    content = RE_MULTI_NEWLINE.sub("\n\n", content)
+
+    # Collapse repeated emoji/chars (🥵🥵🥵🥵 → 🥵🥵)
+    content = _collapse_repeated_chars(content)
+
+    # Drop punctuation/emoji-only messages under 3 chars
+    if len(content) < 3 and RE_PUNCT_ONLY.match(content):
+        return None
+
+    return content
+
+
+def normalize_messages(messages: list[dict]) -> list[dict]:
+    """Normalize all messages, dropping empty/garbage ones."""
+    cleaned = []
+    for m in messages:
+        if m["role"] == "system":
+            cleaned.append(m)
+            continue
+        normalized = normalize_message(m["content"])
+        if normalized:
+            cleaned.append({**m, "content": normalized})
+    return cleaned
+
+
 def filter_noise(messages: list[dict]) -> list[dict]:
     """Remove noisy messages: ads, broadcasts, UI artifacts."""
     filtered = []
@@ -823,12 +880,17 @@ def filter_noise(messages: list[dict]) -> list[dict]:
 
 def build_session_record(messages: list[dict], source_file: str, confidence: str) -> dict | None:
     """Build a session record with archetype-specific system prompt."""
-    # Strip date keys from messages
+    # Strip date keys and do final text normalization (merging re-introduces
+    # multi-newlines from concatenated messages)
     clean_messages = []
     for msg in messages:
+        content = msg["content"]
+        content = RE_MULTI_NEWLINE.sub("\n\n", content).strip()
+        if not content:
+            continue
         clean_messages.append({
             "role": msg["role"],
-            "content": msg["content"],
+            "content": content,
         })
 
     # Auto-classify this session's archetype from subscriber content
