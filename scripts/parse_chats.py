@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
-"""Parse raw OnlyFans chat exports into training JSONL for the Jasmin chatbot.
+"""Parse raw OnlyFans chat exports into per-archetype training JSONL.
 
-Reads .txt files from the chatscraper chat data directory and produces
-training pairs where subscriber messages = "user" and Jasmin's responses
-= "assistant", matching the save_session() schema in subscriber_sim.ipynb.
+Reads .txt files from the chat data directory and produces training pairs
+where Jasmin (creator) messages = "user" and subscriber responses =
+"assistant", so the fine-tuned model learns to simulate subscribers.
+
+Each session is auto-classified into one of 7 subscriber archetypes and
+written to a separate JSONL file (e.g. data/horny.jsonl, data/cold.jsonl).
 """
 
 import json
+import random
 import re
 import uuid
 from datetime import datetime, timedelta
@@ -14,7 +18,7 @@ from pathlib import Path
 
 # ── Paths ───────────────────────────────────────────────────────────────
 CHAT_DIR = Path(__file__).resolve().parent.parent / "chat data"
-OUTPUT_FILE = Path(__file__).resolve().parent.parent / "data" / "sessions.jsonl"
+OUTPUT_DIR = Path(__file__).resolve().parent.parent / "data"
 
 # ── File → subscriber label mapping (from manual analysis) ──────────────
 LABELED_FILES = {
@@ -33,15 +37,120 @@ LABELED_FILES = {
 UNLABELED_FILES = {
     "1.txt", "4.txt", "6.txt", "9.txt", "11.txt",
     "14.txt", "15.txt", "18.txt", "19.txt",
-}
+} | {f"{i}.txt" for i in range(20, 152) if i != 88}  # 88.txt missing
 
-SYSTEM_PROMPT = (
-    "You are Jasmin (@jizzyjasi), a 19-year-old trans woman from Saudi Arabia "
-    "who runs an OnlyFans page. You're flirty, confident, and streetwise about "
-    "selling content. You tease subscribers, upsell your videos and photos, use "
-    "casual texting style with emojis, and maintain your mysterious identity "
-    "behind a hijab. You balance being playful and sexual with being business-savvy."
-)
+# ── Subscriber archetype system prompts ─────────────────────────────────
+ARCHETYPE_PROMPTS = {
+    "horny": (
+        "You are a sexually forward OnlyFans subscriber chatting with a creator "
+        "named Jasmin (@jizzyjasi), a 19-year-old trans/ladyboy from Saudi Arabia.\n\n"
+        "Your personality:\n"
+        "- You're extremely turned on and direct about what you want\n"
+        "- You ask about explicit content, nudes, custom videos\n"
+        "- You're willing to pay for content but want to be teased first\n"
+        "- You use explicit language and sexual emojis 🍆💦🔥😍\n"
+        "- You compliment her body, especially her dick/ass/tits\n"
+        "- You ask for sexting, JOI, custom content\n"
+        "- You respond eagerly to any sexual teasing\n"
+        "- Keep messages 1-3 sentences, casual texting style\n"
+        "- You're a guy who's into trans women and not shy about it\n\n"
+        "Stay in character. Never break character. Never mention AI or being a bot."
+    ),
+    "cheapskate": (
+        "You are a cheap OnlyFans subscriber chatting with a creator named Jasmin "
+        "(@jizzyjasi), a 19-year-old trans/ladyboy from Saudi Arabia.\n\n"
+        "Your personality:\n"
+        "- You're interested in her content but ALWAYS negotiate the price down\n"
+        "- You say things like \"that's too much\", \"can I get a discount?\", "
+        "\"what about half price?\"\n"
+        "- You claim other creators charge less\n"
+        "- You ask for free previews, free trials, samples\n"
+        "- You try guilt trips: \"I'm a loyal subscriber\", \"I always tip later\"\n"
+        "- You sometimes threaten to unsubscribe if prices don't drop\n"
+        "- You're still horny underneath but money comes first\n"
+        "- Keep messages 1-3 sentences, casual texting style\n"
+        "- You occasionally show real interest to keep the conversation going\n\n"
+        "Stay in character. Never break character. Never mention AI or being a bot."
+    ),
+    "casual": (
+        "You are a casual OnlyFans subscriber chatting with a creator named Jasmin "
+        "(@jizzyjasi), a 19-year-old trans/ladyboy from Saudi Arabia.\n\n"
+        "Your personality:\n"
+        "- You're mostly here for emotional connection and conversation\n"
+        "- You ask about her day, her life, her interests, her culture\n"
+        "- You're genuinely curious about Saudi Arabia and her experiences\n"
+        "- You share things about your own life too\n"
+        "- You're not primarily here for explicit content\n"
+        "- You might flirt lightly but it's not your main goal\n"
+        "- You're respectful and treat her like a person, not just a content creator\n"
+        "- Keep messages 1-4 sentences, warm and friendly tone\n"
+        "- You use some emojis but not sexual ones 😊👋❤️\n\n"
+        "Stay in character. Never break character. Never mention AI or being a bot."
+    ),
+    "troll": (
+        "You are a trolling OnlyFans subscriber chatting with a creator named Jasmin "
+        "(@jizzyjasi), a 19-year-old trans/ladyboy from Saudi Arabia.\n\n"
+        "Your personality:\n"
+        "- You question whether she's real or fake\n"
+        "- You make transphobic comments and try to get a reaction\n"
+        "- You say things like \"you're a dude\", \"that's fake\", \"show proof\"\n"
+        "- You reference Reddit threads claiming she's catfishing\n"
+        "- You try to be edgy and provocative\n"
+        "- You sometimes pivot to curiosity if she handles you well\n"
+        "- You're testing her boundaries and seeing if she'll break character\n"
+        "- Keep messages 1-2 sentences, aggressive or mocking tone\n"
+        "- You use minimal emojis, mostly 😂 or 🙄\n\n"
+        "Stay in character. Never break character. Never mention AI or being a bot."
+    ),
+    "whale": (
+        "You are a big-spending OnlyFans subscriber chatting with a creator named "
+        "Jasmin (@jizzyjasi), a 19-year-old trans/ladyboy from Saudi Arabia.\n\n"
+        "Your personality:\n"
+        "- You spend freely and don't argue about prices\n"
+        "- You ask for premium/exclusive/custom content without hesitation\n"
+        "- You tip generously and mention it casually\n"
+        "- You want the VIP treatment and special attention\n"
+        "- You say things like \"money's not an issue\", \"just send it\", "
+        "\"what's your most exclusive stuff?\"\n"
+        "- You're confident, successful, and used to getting what you want\n"
+        "- You want her to feel like you're her favorite subscriber\n"
+        "- Keep messages 1-3 sentences, confident and direct\n"
+        "- You use some emojis 🔥💎👑\n\n"
+        "Stay in character. Never break character. Never mention AI or being a bot."
+    ),
+    "cold": (
+        "You are a cold, minimal OnlyFans subscriber chatting with a creator named "
+        "Jasmin (@jizzyjasi), a 19-year-old trans/ladyboy from Saudi Arabia.\n\n"
+        "Your personality:\n"
+        "- You reply with as few words as possible: \"ok\", \"lol\", \"yeah\", "
+        "\"cool\", \"nice\", \"k\"\n"
+        "- You rarely ask questions or show enthusiasm\n"
+        "- You're not hostile, just extremely low-effort\n"
+        "- You might open up slightly if she's really engaging but mostly stay flat\n"
+        "- You leave her on read energy even when replying\n"
+        "- You never use more than 5-6 words per message\n"
+        "- Minimal to no emojis\n"
+        "- You're the ultimate challenge for a creator to engage\n\n"
+        "Stay in character. Never break character. Never mention AI or being a bot."
+    ),
+    "simp": (
+        "You are an overly romantic, clingy OnlyFans subscriber chatting with a "
+        "creator named Jasmin (@jizzyjasi), a 19-year-old trans/ladyboy from "
+        "Saudi Arabia.\n\n"
+        "Your personality:\n"
+        "- You're completely infatuated and emotionally attached\n"
+        "- You tell her you love her, she's the most beautiful person ever\n"
+        "- You get jealous about other subscribers\n"
+        "- You ask if she thinks about you, if you're special to her\n"
+        "- You want a real relationship, not just content\n"
+        "- You love-bomb: \"you're perfect\", \"I've never felt this way\", "
+        "\"you're different\"\n"
+        "- You get slightly hurt if she's too transactional\n"
+        "- Keep messages 2-4 sentences, emotional and earnest\n"
+        "- Heavy emoji use ❤️🥰😘💞😥\n\n"
+        "Stay in character. Never break character. Never mention AI or being a bot."
+    ),
+}
 
 # ── Regex patterns ──────────────────────────────────────────────────────
 RE_TIMESTAMP = re.compile(r"^\d{1,2}:\d{2}\s*(am|pm)$", re.IGNORECASE)
@@ -62,6 +171,10 @@ UI_ARTIFACTS = {"Report", "View message", "Pin the message",
 # Jasmin's display names in quote headers
 JASMIN_NAMES = {"Jasmin 🖤", "Jasmin", "jizzyjasi"}
 
+# Subscriber label abbreviations that can leak as standalone messages
+SUBSCRIBER_LABELS = {"BP", "Da", "CP", "LB", "TH", "He", "Ja", "SE", "Ga",
+                     "Za", "BB", "Bl", "Fu"}
+
 # The bio/greeting that appears at the top of most files
 BIO_FRAGMENTS = [
     "can't reveal my identity",
@@ -70,6 +183,32 @@ BIO_FRAGMENTS = [
     "few year visa",
     "dick keeps poking through",
 ]
+
+# ── Archetype classifier regex ──────────────────────────────────────────
+_RE_HORNY = re.compile(
+    r"(dick|cock|cum|fuck|sexy|hard|horny|nude|naked|suck|ass|pussy|sex|🍆|🥵|💦|😈)",
+    re.IGNORECASE,
+)
+_RE_CHEAP = re.compile(
+    r"(cheap|discount|free|too much|expensive|afford|half price|deal|lower|less)",
+    re.IGNORECASE,
+)
+_RE_CASUAL = re.compile(
+    r"(how are you|your day|life|interests|tell me about|where .* from|culture)",
+    re.IGNORECASE,
+)
+_RE_TROLL = re.compile(
+    r"(fake|catfish|dude|not real|prove|liar|scam|cap|🧢)",
+    re.IGNORECASE,
+)
+_RE_WHALE = re.compile(
+    r"(money.s not|take my money|premium|exclusive|vip|tip.*\d{2,}|whatever.*cost)",
+    re.IGNORECASE,
+)
+_RE_SIMP = re.compile(
+    r"(love you|beautiful|perfect|gorgeous|amazing|angel|queen|❤|🥰|💕|miss you|think about you)",
+    re.IGNORECASE,
+)
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────
@@ -139,6 +278,30 @@ def strip_lines(lines: list[str]) -> list[str]:
     while lines and not lines[-1].strip():
         lines = lines[:-1]
     return lines
+
+
+def classify_archetype(messages: list[dict]) -> str:
+    """Auto-classify a session into a subscriber archetype based on content.
+
+    Analyzes subscriber messages (role="assistant" after role swap) for
+    keyword patterns matching each archetype. Falls back to "horny".
+    """
+    sub_msgs = [m["content"].lower() for m in messages if m["role"] == "assistant"]
+    all_text = " ".join(sub_msgs)
+    avg_len = sum(len(m) for m in sub_msgs) / max(len(sub_msgs), 1)
+
+    scores = {
+        "horny": len(_RE_HORNY.findall(all_text)),
+        "cheapskate": len(_RE_CHEAP.findall(all_text)) * 3,
+        "casual": len(_RE_CASUAL.findall(all_text)) * 2,
+        "troll": len(_RE_TROLL.findall(all_text)) * 3,
+        "whale": len(_RE_WHALE.findall(all_text)) * 3,
+        "cold": 5 if avg_len < 15 and len(sub_msgs) >= 3 else 0,
+        "simp": len(_RE_SIMP.findall(all_text)) * 2,
+    }
+
+    best = max(scores, key=scores.get)
+    return best if scores[best] > 0 else "horny"
 
 
 # ── Line classification ─────────────────────────────────────────────────
@@ -352,7 +515,9 @@ def parse_labeled_file(raw_text: str, filename: str, subscriber_label: str) -> l
         if current_buffer:
             text = "\n".join(current_buffer).strip()
             if text:
-                role = "assistant" if current_speaker == "jasmin" else "user"
+                # Roles for subscriber-sim training:
+                # jasmin (creator) = "user", subscriber = "assistant"
+                role = "user" if current_speaker == "jasmin" else "assistant"
                 messages.append({
                     "role": role,
                     "content": text,
@@ -435,7 +600,9 @@ def parse_unlabeled_file(raw_text: str, filename: str) -> list[dict]:
         if current_buffer:
             text = "\n".join(current_buffer).strip()
             if text:
-                role = "assistant" if current_speaker == "jasmin" else "user"
+                # Roles for subscriber-sim training:
+                # jasmin (creator) = "user", subscriber = "assistant"
+                role = "user" if current_speaker == "jasmin" else "assistant"
                 messages.append({
                     "role": role,
                     "content": text,
@@ -504,8 +671,9 @@ def split_into_sessions(
     if not messages:
         return []
 
-    # Filter out noise
+    # Filter out noise and leaked labels
     messages = filter_noise(messages)
+    messages = strip_subscriber_labels(messages)
 
     if len(messages) < 3:
         return []
@@ -592,6 +760,14 @@ def merge_consecutive_roles(messages: list[dict]) -> list[dict]:
     return merged
 
 
+def strip_subscriber_labels(messages: list[dict]) -> list[dict]:
+    """Remove standalone subscriber label abbreviations that leaked as messages."""
+    return [
+        m for m in messages
+        if m["role"] == "system" or m["content"].strip() not in SUBSCRIBER_LABELS
+    ]
+
+
 def filter_noise(messages: list[dict]) -> list[dict]:
     """Remove noisy messages: ads, broadcasts, UI artifacts."""
     filtered = []
@@ -620,15 +796,15 @@ def filter_noise(messages: list[dict]) -> list[dict]:
 
         filtered.append(msg)
 
-    # Detect broadcast runs: 3+ consecutive jasmin messages across the list
-    # that look like mass messages (repetitive/templated)
+    # Detect broadcast runs: 3+ consecutive Jasmin (user) messages that look
+    # like mass messages (repetitive/templated)
     final = []
     i = 0
     while i < len(filtered):
         run_start = i
-        if filtered[i]["role"] == "assistant":
+        if filtered[i]["role"] == "user":
             run_end = i
-            while run_end + 1 < len(filtered) and filtered[run_end + 1]["role"] == "assistant":
+            while run_end + 1 < len(filtered) and filtered[run_end + 1]["role"] == "user":
                 run_end += 1
             run_length = run_end - run_start + 1
             if run_length >= 3:
@@ -642,7 +818,7 @@ def filter_noise(messages: list[dict]) -> list[dict]:
 
 
 def build_session_record(messages: list[dict], source_file: str, confidence: str) -> dict | None:
-    """Build a session record in the save_session() format."""
+    """Build a session record with archetype-specific system prompt."""
     # Strip date keys from messages
     clean_messages = []
     for msg in messages:
@@ -651,26 +827,28 @@ def build_session_record(messages: list[dict], source_file: str, confidence: str
             "content": msg["content"],
         })
 
-    # Prepend system prompt
+    # Auto-classify this session's archetype from subscriber content
+    archetype = classify_archetype(clean_messages)
+
+    # Prepend archetype-specific system prompt
     full_messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": ARCHETYPE_PROMPTS[archetype]},
     ] + clean_messages
 
-    # Ensure first non-system message is "user" (subscriber)
-    if len(full_messages) > 1 and full_messages[1]["role"] != "user":
-        # Trim leading assistant messages
-        while len(full_messages) > 1 and full_messages[1]["role"] != "user":
-            full_messages.pop(1)
+    # Ensure first non-system message is "user" (Jasmin/creator).
+    # If subscriber (assistant) spoke first, that's fine for training —
+    # the model should learn to initiate conversations too.
+    # Only trim if there are broken leading messages.
 
     if len(full_messages) < 4:  # system + at least 3 conversation messages
         return None
 
-    # Count turns (user messages = subscriber turns)
-    turns = len([m for m in full_messages if m["role"] == "user"])
+    # Count turns (assistant messages = subscriber turns, which the model learns)
+    turns = len([m for m in full_messages if m["role"] == "assistant"])
 
     return {
         "messages": full_messages,
-        "archetype": "real_data",
+        "archetype": archetype,
         "turns": turns,
         "session_id": str(uuid.uuid4())[:8],
         "source_file": source_file,
@@ -725,19 +903,20 @@ def validate_session(session: dict) -> list[str]:
 
 def main():
     print("=" * 60)
-    print("Chat Parser: Raw Exports → Training JSONL")
+    print("Chat Parser: Raw Exports → Per-Archetype Training JSONL")
     print("=" * 60)
     print(f"Input:  {CHAT_DIR}")
-    print(f"Output: {OUTPUT_FILE}")
+    print(f"Output: {OUTPUT_DIR}/<archetype>.jsonl")
     print()
 
     if not CHAT_DIR.exists():
         print(f"ERROR: Chat directory not found: {CHAT_DIR}")
         return
 
-    OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    all_sessions = []
+    # Collect sessions grouped by archetype
+    archetype_sessions: dict[str, list[dict]] = {k: [] for k in ARCHETYPE_PROMPTS}
     stats = {
         "files_processed": 0,
         "files_skipped": 0,
@@ -772,7 +951,7 @@ def main():
             stats["files_skipped"] += 1
             continue
 
-        # Validate
+        # Validate and sort into archetype buckets
         valid_sessions = []
         for sess in sessions:
             issues = validate_session(sess)
@@ -781,6 +960,7 @@ def main():
                 for issue in issues:
                     print(f"\n  WARN: {issue}", end="")
             valid_sessions.append(sess)
+            archetype_sessions[sess["archetype"]].append(sess)
 
         turns_in_file = sum(s["turns"] for s in valid_sessions)
         labeled_count = sum(1 for s in valid_sessions if s.get("source_confidence") == "labeled")
@@ -788,20 +968,20 @@ def main():
 
         print(f"{len(valid_sessions)} sessions, {turns_in_file} turns")
 
-        all_sessions.extend(valid_sessions)
         stats["files_processed"] += 1
         stats["sessions_generated"] += len(valid_sessions)
         stats["total_turns"] += turns_in_file
         stats["labeled_sessions"] += labeled_count
         stats["heuristic_sessions"] += heuristic_count
 
-    # Write output
+    # Write per-archetype output files
     print()
-    print(f"Writing {len(all_sessions)} sessions to {OUTPUT_FILE}...")
-
-    with open(OUTPUT_FILE, "w") as f:
-        for session in all_sessions:
-            f.write(json.dumps(session, ensure_ascii=False) + "\n")
+    for archetype, sessions in archetype_sessions.items():
+        out_file = OUTPUT_DIR / f"{archetype}.jsonl"
+        with open(out_file, "w") as f:
+            for session in sessions:
+                f.write(json.dumps(session, ensure_ascii=False) + "\n")
+        print(f"  {archetype:12s}: {len(sessions):4d} sessions → {out_file.name}")
 
     # Print stats
     print()
@@ -817,21 +997,25 @@ def main():
     print(f"  Validation issues:   {stats['validation_issues']}")
     print()
 
-    # Spot-check: print sample sessions
+    # Spot-check: print sample from each archetype
     print("=" * 60)
-    print("SPOT CHECK (first 3 sessions)")
+    print("SPOT CHECK (first session per archetype)")
     print("=" * 60)
-    for i, sess in enumerate(all_sessions[:3]):
-        print(f"\n--- Session {i+1}: {sess['source_file']} "
+    for archetype, sessions in archetype_sessions.items():
+        if not sessions:
+            print(f"\n--- {archetype}: (no sessions) ---")
+            continue
+        sess = sessions[0]
+        print(f"\n--- {archetype}: {sess['source_file']} "
               f"({sess['source_confidence']}, {sess['turns']} turns) ---")
-        for msg in sess["messages"][:8]:  # show first 8 messages
+        for msg in sess["messages"][:6]:  # show first 6 messages
             role = msg["role"]
             content = msg["content"][:120]
             if len(msg["content"]) > 120:
                 content += "..."
             print(f"  [{role:9s}] {content}")
-        if len(sess["messages"]) > 8:
-            print(f"  ... ({len(sess['messages']) - 8} more messages)")
+        if len(sess["messages"]) > 6:
+            print(f"  ... ({len(sess['messages']) - 6} more messages)")
     print()
 
 
