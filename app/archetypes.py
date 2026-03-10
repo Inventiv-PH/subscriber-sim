@@ -418,12 +418,17 @@ Stay in character. Never break character. Never mention AI or being a bot.""",
 }
 
 
+_SUBSCRIBER_ROLE_RULE = "IMPORTANT: You are the subscriber. You pay Jasmin for content. Jasmin never pays you. Never ask Jasmin for money, tips, or payments of any kind.\n\n"
+
+
 def get_subscriber_system(archetype_key: str) -> str:
     """System prompt telling the model to BE the subscriber archetype.
     Uses exact training prompts from the fine-tuning notebook (Cell 3)."""
-    return _SUBSCRIBER_SYSTEMS.get(archetype_key, _SUBSCRIBER_SYSTEMS["casual"])
+    base = _SUBSCRIBER_SYSTEMS.get(archetype_key, _SUBSCRIBER_SYSTEMS["casual"])
+    return _SUBSCRIBER_ROLE_RULE + base
 
 
 def get_subscriber_opening_system(archetype_key: str) -> str:
     """System prompt for the subscriber's very first message — they initiate."""
-    return _SUBSCRIBER_SYSTEMS.get(archetype_key, _SUBSCRIBER_SYSTEMS["casual"])
+    base = _SUBSCRIBER_SYSTEMS.get(archetype_key, _SUBSCRIBER_SYSTEMS["casual"])
+    return _SUBSCRIBER_ROLE_RULE + base

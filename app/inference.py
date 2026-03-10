@@ -35,9 +35,17 @@ _ARCHETYPE_PARAMS = {
     "cold": dict(max_tokens=10, temperature=0.75, top_p=0.88),
 }
 
-# Seed sent as the user turn to prompt the subscriber's dynamic opening message.
-# Matches the exact prompt used in notebook Cell 5 generate_dynamic_opener().
-_OPENER_SEED = "Generate ONE unique opening message to start a chat with Jasmin. Be brief (1-2 sentences max). Just the message, nothing else."
+# Per-archetype opener seeds — tell the model exactly what kind of first message to write.
+# Generic seed produces off-character openers; specific seeds lock in the personality.
+_OPENER_SEEDS = {
+    "horny":      "Generate ONE opening message as a sexually forward subscriber to Jasmin. Be explicit, turned on, direct about wanting her content. 1-2 sentences max. Just the message.",
+    "cheapskate": "Generate ONE opening message as a cheap subscriber to Jasmin. Show interest but immediately question her prices or ask for a deal. 1-2 sentences max. Just the message.",
+    "casual":     "Generate ONE opening message as a casual, friendly subscriber to Jasmin. Be warm and curious, ask about her day or compliment her vibe. 1-2 sentences max. Just the message.",
+    "troll":      "Generate ONE opening message as a troll subscriber to Jasmin. Question if she is real, call her a catfish or a bot, be sarcastic. 1-2 sentences max. Just the message.",
+    "whale":      "Generate ONE opening message as a big-spending subscriber to Jasmin. Ask about her most premium or exclusive content, make it clear money is no issue. 1-2 sentences max. Just the message.",
+    "cold":       "Generate ONE opening message as a cold, minimal subscriber to Jasmin. Use as few words as possible — 1 to 4 words only. Just the message.",
+    "simp":       "Generate ONE opening message as a lovesick, infatuated subscriber to Jasmin. Shower her with compliments and express how obsessed you are. 1-2 sentences max. Just the message.",
+}
 
 # Keep only the last N turns to limit prompt size and Modal GPU time
 _MAX_HISTORY_TURNS = 8
@@ -138,7 +146,7 @@ def _stream_modal(history: list[dict], archetype_key: str) -> Generator[str, Non
         model = _get_modal_model()
         chat = [{"role": m["role"], "content": m["content"]} for m in _trim_history(history)]
         if not chat:
-            chat = [{"role": "user", "content": _OPENER_SEED}]
+            chat = [{"role": "user", "content": _OPENER_SEEDS.get(archetype_key, _OPENER_SEEDS["casual"])}]
         system = get_subscriber_system(archetype_key)
         messages = [{"role": "system", "content": system}] + chat
         p = _params(archetype_key)
@@ -209,6 +217,23 @@ def _stream_mlx(history: list[dict], archetype_key: str) -> Generator[str, None,
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
+def generate_opener(archetype_key: str) -> str:
+    """Generate a dynamic opening message for the given archetype.
+
+    Uses an archetype-specific seed so the model stays firmly in character.
+    Falls back to the static ARCHETYPES opener on any error.
+    """
+    from archetypes import ARCHETYPES
+    seed = _OPENER_SEEDS.get(archetype_key, _OPENER_SEEDS["casual"])
+    try:
+        seed_history = [{"role": "user", "content": seed}]
+        result = "".join(stream_response(seed_history, archetype_key)).strip()
+        return result or ARCHETYPES[archetype_key]["opener"]
+    except Exception as e:
+        print(f"⚠️ generate_opener failed ({archetype_key}): {e}", flush=True)
+        return ARCHETYPES[archetype_key]["opener"]
+
+
 def health_check() -> bool:
     """Check backend health. Modal result is cached for 60s to avoid per-render overhead."""
     import time

@@ -114,7 +114,7 @@ if _pick and _pick in ARCHETYPES:
         _arch_p = ARCHETYPES[_pick]
         _title_p = f"{_arch_p['label']} · {datetime.now().strftime('%b %d %H:%M')}"
         _conv_p = db.create_conversation(_title_p, _pick)
-        db.add_message(_conv_p["id"], "assistant", _arch_p["opener"])
+        db.add_message(_conv_p["id"], "assistant", inference.generate_opener(_pick))
         st.session_state.active_conv_id = _conv_p["id"]
         st.session_state.show_new_conv = False
     st.rerun()
@@ -248,7 +248,7 @@ def _start_new_conv(archetype_key: str) -> None:
     arch = ARCHETYPES[archetype_key]
     title = f"{arch['label']} · {_ts()}"
     conv = db.create_conversation(title, archetype_key)
-    db.add_message(conv["id"], "assistant", arch["opener"])
+    db.add_message(conv["id"], "assistant", inference.generate_opener(archetype_key))
     st.session_state.active_conv_id = conv["id"]
     st.session_state.show_new_conv = False
 
