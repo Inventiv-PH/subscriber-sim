@@ -1,11 +1,12 @@
 import logging
 import os
 import re
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 
 from archetypes import (
     ARCHETYPES,
     _SUBSCRIBER_SYSTEMS,
+    get_archetype_loop_break,
     get_archetype_mid_convo_reminder,
 )
 
@@ -35,7 +36,7 @@ _DEFAULT_PARAMS = dict(
 # Tighter params = more consistent archetype adherence
 _ARCHETYPE_PARAMS = {
     "horny":      dict(max_tokens=80,  temperature=0.75, top_p=0.85, rep_pen=1.05),
-    "cheapskate": dict(max_tokens=100, temperature=0.70, top_p=0.80, rep_pen=1.00),
+    "cheapskate": dict(max_tokens=100, temperature=0.70, top_p=0.80, rep_pen=1.10),
     "casual":     dict(max_tokens=75,  temperature=0.65, top_p=0.80, rep_pen=1.00),
     "troll":      dict(max_tokens=85,  temperature=0.80, top_p=0.90, rep_pen=1.15),
     "whale":      dict(max_tokens=90,  temperature=0.65, top_p=0.75, rep_pen=1.05),
@@ -124,15 +125,29 @@ def _get_modal_model():
     return cls()
 
 
-def _inject_mid_convo_reminder(chat: list[dict], archetype_key: str) -> list[dict]:
-    """Append an archetype reminder to the last user message after 3+ exchanges."""
-    if len(chat) < _MAX_HISTORY_TURNS:
-        log.debug("mid-convo reminder skipped (%d msgs < %d threshold)", len(chat), _MAX_HISTORY_TURNS)
-        return chat
+def _is_looping(chat: list[dict], n: int = 2) -> bool:
+    """Return True if the last n messages of either role are identical.
+
+    Checks both Jasmin (user) and subscriber (assistant) sides — the loop can
+    originate from either direction.
+    """
+    user_msgs = [m["content"].split("\n\n")[0] for m in chat if m["role"] == "user"]
+    if len(user_msgs) >= n and len(set(user_msgs[-n:])) == 1:
+        return True
+    asst_msgs = [m["content"] for m in chat if m["role"] == "assistant"]
+    if len(asst_msgs) >= n and len(set(asst_msgs[-n:])) == 1:
+        return True
+    return False
+
+
+def _inject_mid_convo_reminder(chat: list[dict], archetype_key: str, looping: bool = False) -> list[dict]:
+    """Append an archetype reminder to the last user message on every turn."""
     reminder = get_archetype_mid_convo_reminder(archetype_key)
     if not reminder:
         return chat
-    # Find last user message and append reminder at maximum recency
+    if looping:
+        reminder += " " + get_archetype_loop_break(archetype_key)
+        log.info("loop detected for [%s] — appended escalation cue", archetype_key)
     for i in range(len(chat) - 1, -1, -1):
         if chat[i]["role"] == "user":
             chat[i] = {**chat[i], "content": chat[i]["content"] + "\n\n" + reminder}
@@ -147,10 +162,20 @@ def _stream_modal(history: list[dict], archetype_key: str) -> Generator[str, Non
         model = _get_modal_model()
         normalized = _normalize_history(history)
         chat = [{"role": m["role"], "content": m["content"]} for m in normalized]
-        chat = _inject_mid_convo_reminder(chat, archetype_key)
+        looping = _is_looping(chat)
+        chat = _inject_mid_convo_reminder(chat, archetype_key, looping=looping)
         system = _SUBSCRIBER_SYSTEMS.get(archetype_key, _SUBSCRIBER_SYSTEMS["casual"])
         messages = [{"role": "system", "content": system}] + chat
         p = _params(archetype_key)
+        # When looping, boost rep_pen and temperature to force variety.
+        # Text-only cues are insufficient — the model needs sampling pressure.
+        if looping:
+            p = {
+                **p,
+                "rep_pen":     min(p["rep_pen"] + 0.20, 1.40),
+                "temperature": min(p["temperature"] + 0.15, 1.0),
+            }
+            log.info("loop params: temp=%.2f rep_pen=%.2f", p["temperature"], p["rep_pen"])
         log.info("system prompt: %d chars | msgs to model: %d", len(system), len(messages))
         log.info("params: max_tokens=%s temp=%.2f top_p=%.2f rep_pen=%.2f",
                  p["max_tokens"], p["temperature"], p["top_p"], p["rep_pen"])
@@ -170,30 +195,97 @@ def _stream_modal(history: list[dict], archetype_key: str) -> Generator[str, Non
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
+
+# Per-archetype opener validators. Generated openers that fail the check are
+# discarded and the static opener is used instead.
+_OPENER_VALIDATORS: dict[str, "Callable[[str], bool]"] = {
+    "cold":       lambda t: len(t.split()) <= 4,                     # "hey", "sup", "hi" only
+    "simp":       lambda t: len(t.split()) >= 5,                     # must be emotionally verbose
+    "horny":      lambda t: len(t.split()) >= 3,
+    "cheapskate": lambda t: len(t.split()) >= 3,
+    "casual":     lambda t: len(t.split()) >= 3,
+    "troll":      lambda t: len(t.split()) >= 3,
+    "whale":      lambda t: len(t.split()) >= 3,
+}
+
+_EXPLICIT_WORDS = {"cum", "cock", "dick", "pussy", "fuck", "suck", "sex", "nude", "nudes", "naked"}
+
+def _opener_is_valid(text: str, archetype_key: str) -> bool:
+    """Return False if the opener fails basic archetype sanity checks."""
+    if not text or not text.strip():
+        return False
+    words = set(text.lower().split())
+    # Cold openers must never be explicit
+    if archetype_key == "cold" and words & _EXPLICIT_WORDS:
+        log.warning("cold opener failed explicit-content check: %.60s", text)
+        return False
+    validator = _OPENER_VALIDATORS.get(archetype_key)
+    if validator and not validator(text):
+        log.warning("[%s] opener failed length check (%d words): %.60s",
+                    archetype_key, len(text.split()), text)
+        return False
+    return True
+
+
 def _static_opener(archetype_key: str) -> str:
-    """Return the static opener for the archetype — matches training data."""
+    """Return the static opener for the archetype — fallback only."""
     return ARCHETYPES[archetype_key]["opener"]
 
 
-def stream_opener(archetype_key: str) -> Generator[str, None, None]:
-    """Yield the static opener for the archetype.
+def _generate_opener_modal(archetype_key: str) -> str:
+    """Generate a fresh opener via Modal.
 
-    Training sessions always started with a fixed opener (no preceding Jasmin
-    message). Using the static opener ensures inference starts in the exact same
-    distribution as training data.
+    Uses the bare _SUBSCRIBER_SYSTEMS prompt (identical to training) with no
+    history. The model was fine-tuned to produce an archetype-correct first
+    message from exactly this format — system only, no preceding user turn.
+
+    The generation context is discarded after use; only the opener text is kept,
+    so this cannot bleed into mid-conversation history.
+    Falls back to the static opener on any error.
     """
-    opener = _static_opener(archetype_key)
-    log.info("── stream_opener [%s] ── static opener: %.80s", archetype_key, opener)
+    try:
+        model = _get_modal_model()
+        # Use the same bare system prompt as training — no role declarations,
+        # no few-shots, no TASK directives. Distribution shift kills archetype fidelity.
+        system = _SUBSCRIBER_SYSTEMS.get(archetype_key, _SUBSCRIBER_SYSTEMS["casual"])
+        # System-only: model generates the first assistant turn with no preceding
+        # user message — matches the training format exactly.
+        messages = [{"role": "system", "content": system}]
+        p = _params(archetype_key)
+        log.info("── dynamic opener [%s] ── system: %d chars", archetype_key, len(system))
+        tokens = list(model.generate.remote_gen(
+            messages,
+            stop=p["stop"],
+            max_tokens=p["max_tokens"],
+            temperature=p["temperature"] + 0.05,  # slight boost for opener variety
+            top_p=p["top_p"],
+            rep_pen=p["rep_pen"],
+        ))
+        opener = _filter_response("".join(tokens), archetype_key)
+        if _opener_is_valid(opener, archetype_key):
+            log.info("dynamic opener accepted: %.120s", opener)
+            return opener
+        log.warning("[%s] dynamic opener rejected — using static fallback", archetype_key)
+    except Exception as e:
+        log.error("dynamic opener failed: %s — falling back to static", e)
+    return _static_opener(archetype_key)
+
+
+def stream_opener(archetype_key: str) -> Generator[str, None, None]:
+    """Yield a dynamically generated opener for the archetype.
+
+    The opener is generated in isolation (no conversation history) so it cannot
+    bleed into or alter mid-conversation context. Only the opener text is kept;
+    the generation system prompt is discarded after use.
+    """
+    opener = _generate_opener_modal(archetype_key)
+    log.info("── stream_opener [%s] ── %.80s", archetype_key, opener)
     yield opener
 
 
 def generate_opener(archetype_key: str) -> str:
-    """Return the static opener for the archetype.
-
-    Training data always used fixed openers — dynamic generation introduced
-    a distribution mismatch. Static openers are always in-character and instant.
-    """
-    return ARCHETYPES[archetype_key]["opener"]
+    """Return a dynamically generated opener for the archetype."""
+    return _generate_opener_modal(archetype_key)
 
 
 def health_check() -> bool:

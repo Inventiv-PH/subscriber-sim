@@ -88,17 +88,17 @@ app: $(STAMP)
 	$(VENV_ST) run app/main.py
 
 # ── Docker ────────────────────────────────────────────────────────────────────
-docker-build:
+build:
 	@printf "$(YELLOW)Building Docker image…$(NC)\n"
 	docker build -t jasmin-chat .
 	@printf "$(GREEN)✅ Image built$(NC)\n"
 
-docker-up: convert
+up: convert
 	@printf "$(GREEN)Starting Streamlit app via Docker on http://localhost:8501$(NC)\n"
 	@printf "$(YELLOW)Make sure MLX server is running (make server in another terminal).$(NC)\n\n"
 	docker compose up --build
 
-docker-down:
+down:
 	docker compose down
 	@printf "$(GREEN)✅ Stopped$(NC)\n"
 
