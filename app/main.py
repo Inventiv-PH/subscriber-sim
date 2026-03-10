@@ -94,11 +94,15 @@ st.markdown("""
 # ── DB init ───────────────────────────────────────────────────────────────────
 db.init_db()
 
-# ── Session state ─────────────────────────────────────────────────────────────
+# ── Session state (restore from URL on first load) ────────────────────────────
 if "active_conv_id" not in st.session_state:
-    st.session_state.active_conv_id = None
+    _url_conv = st.query_params.get("conv")
+    try:
+        st.session_state.active_conv_id = int(_url_conv) if _url_conv else None
+    except (ValueError, TypeError):
+        st.session_state.active_conv_id = None
 if "show_new_conv" not in st.session_state:
-    st.session_state.show_new_conv = False
+    st.session_state.show_new_conv = st.query_params.get("view") == "new"
 if "editing_title" not in st.session_state:
     st.session_state.editing_title = None
 
@@ -110,11 +114,19 @@ if _pick and _pick in ARCHETYPES:
         _arch_p = ARCHETYPES[_pick]
         _title_p = f"{_arch_p['label']} · {datetime.now().strftime('%b %d %H:%M')}"
         _conv_p = db.create_conversation(_title_p, _pick)
-        _resp_p = "".join(inference.stream_response([{"role": "user", "content": _arch_p['opener']}], _pick))
+        _resp_p = "".join(inference.stream_response([], _pick))
         db.add_message(_conv_p["id"], "assistant", _resp_p)
         st.session_state.active_conv_id = _conv_p["id"]
         st.session_state.show_new_conv = False
     st.rerun()
+
+# ── Sync URL to current state ─────────────────────────────────────────────────
+if st.session_state.active_conv_id:
+    st.query_params["conv"] = str(st.session_state.active_conv_id)
+elif st.session_state.show_new_conv:
+    st.query_params["view"] = "new"
+else:
+    st.query_params.clear()
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def _short(text: str, n: int = 26) -> str:
@@ -237,13 +249,10 @@ def _start_new_conv(archetype_key: str) -> None:
     arch = ARCHETYPES[archetype_key]
     title = f"{arch['label']} · {_ts()}"
     conv = db.create_conversation(title, archetype_key)
-    conv_id = conv["id"]
-    opener = arch["opener"]
-    full_response = "".join(
-        inference.stream_response([{"role": "user", "content": opener}], archetype_key)
-    )
-    db.add_message(conv_id, "assistant", full_response)
-    st.session_state.active_conv_id = conv_id
+    # Pass empty history — inference uses get_jasmin_opening_system and no user message
+    full_response = "".join(inference.stream_response([], archetype_key))
+    db.add_message(conv["id"], "assistant", full_response)
+    st.session_state.active_conv_id = conv["id"]
     st.session_state.show_new_conv = False
 
 

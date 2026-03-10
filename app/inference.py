@@ -38,18 +38,29 @@ _DEFAULT_PARAMS = dict(
 #   cheapskate→ firm and playful, medium length
 #   casual    → relaxed, conversational
 _ARCHETYPE_PARAMS = {
-    "cold":       dict(max_tokens=35,  temperature=0.75, top_p=0.88, rep_pen=1.15),
+    "cold":       dict(max_tokens=35,  temperature=0.75, top_p=0.88, rep_pen=1.0),   # short + no rep_pen
     "horny":      dict(max_tokens=130, temperature=1.05, top_p=0.95, rep_pen=1.05),
     "simp":       dict(max_tokens=130, temperature=0.9,  top_p=0.95, rep_pen=1.1),
-    "troll":      dict(max_tokens=70,  temperature=1.05, top_p=0.95, rep_pen=1.1),
+    "troll":      dict(max_tokens=70,  temperature=1.05, top_p=0.95, rep_pen=1.0),   # punchy + no rep_pen
     "whale":      dict(max_tokens=110, temperature=0.85, top_p=0.90, rep_pen=1.1),
     "cheapskate": dict(max_tokens=100, temperature=0.95, top_p=0.95, rep_pen=1.1),
     "casual":     dict(max_tokens=115, temperature=0.9,  top_p=0.95, rep_pen=1.1),
 }
 
+# Keep only the last N turns to limit prompt size and Modal GPU time
+_MAX_HISTORY_TURNS = 8
+
+_health_cache: dict = {}
+
 
 def _params(archetype_key: str) -> dict:
     return {**_DEFAULT_PARAMS, **_ARCHETYPE_PARAMS.get(archetype_key, {})}
+
+
+def _trim_history(history: list[dict]) -> list[dict]:
+    """Keep the last _MAX_HISTORY_TURNS message pairs to cap prompt tokens."""
+    max_msgs = _MAX_HISTORY_TURNS * 2
+    return history[-max_msgs:] if len(history) > max_msgs else history
 
 
 
@@ -82,9 +93,8 @@ def _stream_adapter(history: list[dict], archetype_key: str) -> Generator[str, N
     try:
         model, tokenizer = _load_adapter()
         chat = [{"role": m["role"], "content": m["content"]} for m in history]
-        system = get_jasmin_opening_system(archetype_key) if not chat else get_jasmin_system(archetype_key)
-        if not chat:
-            chat = [{"role": "user", "content": "start"}]
+        is_opening = not chat
+        system = get_jasmin_opening_system(archetype_key) if is_opening else get_jasmin_system(archetype_key)
         messages = [{"role": "system", "content": system}] + chat
 
         input_ids = tokenizer.apply_chat_template(
@@ -135,10 +145,8 @@ def _get_modal_model():
 def _stream_modal(history: list[dict], archetype_key: str) -> Generator[str, None, None]:
     try:
         model = _get_modal_model()
-        chat = [{"role": m["role"], "content": m["content"]} for m in history]
+        chat = [{"role": m["role"], "content": m["content"]} for m in _trim_history(history)]
         system = get_jasmin_opening_system(archetype_key) if not chat else get_jasmin_system(archetype_key)
-        if not chat:
-            chat = [{"role": "user", "content": "start"}]
         messages = [{"role": "system", "content": system}] + chat
         p = _params(archetype_key)
         for token in model.generate.remote_gen(
@@ -163,8 +171,6 @@ def _stream_mlx(history: list[dict], archetype_key: str) -> Generator[str, None,
 
     chat = [{"role": m["role"], "content": m["content"]} for m in history]
     system = get_jasmin_opening_system(archetype_key) if not chat else get_jasmin_system(archetype_key)
-    if not chat:
-        chat = [{"role": "user", "content": "start"}]
     p = _params(archetype_key)
     payload = {
         "model": MODEL_NAME,
@@ -208,13 +214,20 @@ def _stream_mlx(history: list[dict], archetype_key: str) -> Generator[str, None,
 
 # ── Public API ────────────────────────────────────────────────────────────────
 def health_check() -> bool:
+    """Check backend health. Modal result is cached for 60s to avoid per-render overhead."""
+    import time
     if BACKEND == "modal":
+        cached = _health_cache.get("modal")
+        if cached and time.time() - cached["ts"] < 60:
+            return cached["ok"]
         try:
             import modal
             modal.Cls.from_name("jasmin-inference", "JasminModel")
-            return True
+            result = True
         except Exception:
-            return False
+            result = False
+        _health_cache["modal"] = {"ok": result, "ts": time.time()}
+        return result
     elif BACKEND == "adapter":
         return os.path.isfile(os.path.join(os.path.abspath(ADAPTER_PATH), "adapter_config.json"))
     else:

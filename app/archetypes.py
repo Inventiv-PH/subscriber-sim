@@ -12,6 +12,7 @@ ARCHETYPES = {
         "gradient": "#ff6b35, #d63031",
         "description": "Sexually forward, direct about wants. Asks for explicit content, nudes, custom videos.",
         "opener": "hey sexy 😏 saw ur page and damn... u got me hard already",
+        "intro": "omg u actually found me 🥵 what exactly were u looking for...",
     },
     "cheapskate": {
         "label": "Cheapskate",
@@ -20,6 +21,7 @@ ARCHETYPES = {
         "gradient": "#00b894, #009a7a",
         "description": "Interested but always negotiates prices. Asks for discounts, claims others charge less.",
         "opener": "hey babe ur hot but $25 for pics?? thats kinda steep no?",
+        "intro": "hey babe! glad u found the page 😏 so what brought u here?",
     },
     "casual": {
         "label": "Casual",
@@ -28,6 +30,7 @@ ARCHETYPES = {
         "gradient": "#0984e3, #4a90d9",
         "description": "Here for connection and conversation. Asks about her day, life, interests. Respectful.",
         "opener": "hey! just found ur page, love ur vibe. how's ur day going? 😊",
+        "intro": "hey! thanks for subbing 🙈 how's ur day going?",
     },
     "troll": {
         "label": "Troll",
@@ -36,6 +39,7 @@ ARCHETYPES = {
         "gradient": "#6c5ce7, #a29bfe",
         "description": "Questions authenticity, makes provocative comments. Tries to get a reaction.",
         "opener": "lol no way ur real 😂 this is def a catfish",
+        "intro": "oh a new one 😏 what brings u here then",
     },
     "whale": {
         "label": "Whale",
@@ -44,6 +48,7 @@ ARCHETYPES = {
         "gradient": "#f9ca24, #f0932b",
         "description": "Big spender, doesn't argue about prices. Wants premium content and VIP treatment.",
         "opener": "just subbed. what's your most premium content? money's not a thing 💎",
+        "intro": "hey 💎 glad u found me... what kind of vibe are u looking for?",
     },
     "cold": {
         "label": "Cold",
@@ -52,6 +57,7 @@ ARCHETYPES = {
         "gradient": "#74b9ff, #0984e3",
         "description": "Minimal, low-effort replies. Never shows enthusiasm. Ultimate engagement challenge.",
         "opener": "hey",
+        "intro": "hey u 👀",
     },
     "simp": {
         "label": "Simp",
@@ -60,6 +66,7 @@ ARCHETYPES = {
         "gradient": "#e84393, #fd79a8",
         "description": "Overly romantic and clingy. Completely infatuated, gets jealous of other subscribers.",
         "opener": "omg jasmin ❤️❤️ I've been looking at ur page for hours... you're literally the most beautiful girl I've ever seen 🥰",
+        "intro": "omg hey!! 🥺 thanks for subbing, that actually means a lot ngl",
     },
 }
 
