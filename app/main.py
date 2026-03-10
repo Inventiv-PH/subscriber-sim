@@ -97,10 +97,8 @@ db.init_db()
 # ── Session state (restore from URL on first load) ────────────────────────────
 if "active_conv_id" not in st.session_state:
     _url_conv = st.query_params.get("conv")
-    try:
-        st.session_state.active_conv_id = int(_url_conv) if _url_conv else None
-    except (ValueError, TypeError):
-        st.session_state.active_conv_id = None
+    # Conv IDs are hex strings — store as-is, never cast to int
+    st.session_state.active_conv_id = _url_conv if _url_conv else None
 if "show_new_conv" not in st.session_state:
     st.session_state.show_new_conv = st.query_params.get("view") == "new"
 if "editing_title" not in st.session_state:
@@ -109,6 +107,10 @@ if "editing_title" not in st.session_state:
 # ── Handle archetype picker click (query param set by HTML grid) ──────────────
 _pick = st.query_params.get("pick")
 if _pick and _pick in ARCHETYPES:
+    # Clear all state before creating new conversation to prevent any bleed
+    st.session_state.active_conv_id = None
+    st.session_state.show_new_conv = False
+    st.session_state.editing_title = None
     st.query_params.clear()
     with st.spinner("Starting conversation…"):
         _arch_p = ARCHETYPES[_pick]
@@ -116,7 +118,6 @@ if _pick and _pick in ARCHETYPES:
         _conv_p = db.create_conversation(_title_p, _pick)
         db.add_message(_conv_p["id"], "assistant", inference.generate_opener(_pick))
         st.session_state.active_conv_id = _conv_p["id"]
-        st.session_state.show_new_conv = False
     st.rerun()
 
 # ── Sync URL to current state ─────────────────────────────────────────────────
@@ -245,12 +246,15 @@ def _arch_grid_html() -> str:
 
 
 def _start_new_conv(archetype_key: str) -> None:
+    # Reset all state before creating new conversation
+    st.session_state.active_conv_id = None
+    st.session_state.show_new_conv = False
+    st.session_state.editing_title = None
     arch = ARCHETYPES[archetype_key]
     title = f"{arch['label']} · {_ts()}"
     conv = db.create_conversation(title, archetype_key)
     db.add_message(conv["id"], "assistant", inference.generate_opener(archetype_key))
     st.session_state.active_conv_id = conv["id"]
-    st.session_state.show_new_conv = False
 
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
@@ -331,6 +335,12 @@ elif st.session_state.active_conv_id:
 
     if not conv:
         st.warning("Conversation not found.")
+        st.session_state.active_conv_id = None
+        st.session_state.editing_title = None
+        st.rerun()
+
+    # Paranoia check: conv ID in DB must match session state exactly
+    if conv and conv["id"] != st.session_state.active_conv_id:
         st.session_state.active_conv_id = None
         st.rerun()
 

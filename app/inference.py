@@ -35,16 +35,17 @@ _ARCHETYPE_PARAMS = {
     "cold": dict(max_tokens=10, temperature=0.75, top_p=0.88),
 }
 
-# Per-archetype opener seeds — tell the model exactly what kind of first message to write.
-# Generic seed produces off-character openers; specific seeds lock in the personality.
+# Per-archetype opener seeds.
+# Written as Jasmin's "trigger" line — the model reacts to this as the subscriber,
+# which produces far more in-character openers than instructional prompts.
 _OPENER_SEEDS = {
-    "horny":      "Generate ONE opening message as a sexually forward subscriber to Jasmin. Be explicit, turned on, direct about wanting her content. 1-2 sentences max. Just the message.",
-    "cheapskate": "Generate ONE opening message as a cheap subscriber to Jasmin. Show interest but immediately question her prices or ask for a deal. 1-2 sentences max. Just the message.",
-    "casual":     "Generate ONE opening message as a casual, friendly subscriber to Jasmin. Be warm and curious, ask about her day or compliment her vibe. 1-2 sentences max. Just the message.",
-    "troll":      "Generate ONE opening message as a troll subscriber to Jasmin. Question if she is real, call her a catfish or a bot, be sarcastic. 1-2 sentences max. Just the message.",
-    "whale":      "Generate ONE opening message as a big-spending subscriber to Jasmin. Ask about her most premium or exclusive content, make it clear money is no issue. 1-2 sentences max. Just the message.",
-    "cold":       "Generate ONE opening message as a cold, minimal subscriber to Jasmin. Use as few words as possible — 1 to 4 words only. Just the message.",
-    "simp":       "Generate ONE opening message as a lovesick, infatuated subscriber to Jasmin. Shower her with compliments and express how obsessed you are. 1-2 sentences max. Just the message.",
+    "horny":      "hey 😏 just saw u subscribed... what's on ur mind",
+    "cheapskate": "hey! welcome, so glad u found the page 😊 lmk if u have any questions",
+    "casual":     "hey! thanks for subbing 🙈 how's ur day going?",
+    "troll":      "oh hey, didn't expect a message — what's up",
+    "whale":      "hey 💎 welcome, so glad u found me — what are u looking for?",
+    "cold":       "hey, u there?",
+    "simp":       "omg hey!! thanks for subbing that actually means a lot 🥺",
 }
 
 # Keep only the last N turns to limit prompt size and Modal GPU time
@@ -61,6 +62,23 @@ def _trim_history(history: list[dict]) -> list[dict]:
     """Keep the last _MAX_HISTORY_TURNS message pairs to cap prompt tokens."""
     max_msgs = _MAX_HISTORY_TURNS * 2
     return history[-max_msgs:] if len(history) > max_msgs else history
+
+
+def _normalize_history(history: list[dict], archetype_key: str) -> list[dict]:
+    """Ensure the chat always starts with a user turn.
+
+    The opener is saved to DB as role=assistant with no preceding user message.
+    Without a user turn first, the chat template produces a malformed prompt
+    and the model loses track of which archetype it's playing.
+    We prepend the archetype-specific opener seed so the structure is always:
+        user (seed) → assistant (opener) → user → assistant → …
+    """
+    if not history:
+        return history
+    if history[0]["role"] == "assistant":
+        seed = _OPENER_SEEDS.get(archetype_key, _OPENER_SEEDS["casual"])
+        return [{"role": "user", "content": seed}] + history
+    return history
 
 
 
@@ -92,7 +110,8 @@ def _stream_adapter(history: list[dict], archetype_key: str) -> Generator[str, N
 
     try:
         model, tokenizer = _load_adapter()
-        chat = [{"role": m["role"], "content": m["content"]} for m in history]
+        normalized = _normalize_history(history, archetype_key)
+        chat = [{"role": m["role"], "content": m["content"]} for m in normalized]
         system = get_subscriber_system(archetype_key)
         messages = [{"role": "system", "content": system}] + chat
 
@@ -144,7 +163,8 @@ def _get_modal_model():
 def _stream_modal(history: list[dict], archetype_key: str) -> Generator[str, None, None]:
     try:
         model = _get_modal_model()
-        chat = [{"role": m["role"], "content": m["content"]} for m in _trim_history(history)]
+        normalized = _normalize_history(_trim_history(history), archetype_key)
+        chat = [{"role": m["role"], "content": m["content"]} for m in normalized]
         if not chat:
             chat = [{"role": "user", "content": _OPENER_SEEDS.get(archetype_key, _OPENER_SEEDS["casual"])}]
         system = get_subscriber_system(archetype_key)
@@ -170,9 +190,10 @@ def _stream_mlx(history: list[dict], archetype_key: str) -> Generator[str, None,
     import json
     import httpx
 
-    chat = [{"role": m["role"], "content": m["content"]} for m in history]
+    normalized = _normalize_history(history, archetype_key)
+    chat = [{"role": m["role"], "content": m["content"]} for m in normalized]
     if not chat:
-        chat = [{"role": "user", "content": _OPENER_SEED}]
+        chat = [{"role": "user", "content": _OPENER_SEEDS.get(archetype_key, _OPENER_SEEDS["casual"])}]
     system = get_subscriber_system(archetype_key)
     p = _params(archetype_key)
     payload = {
