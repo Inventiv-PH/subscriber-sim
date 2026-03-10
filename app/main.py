@@ -342,21 +342,19 @@ elif st.session_state.active_conv_id:
     st.markdown(f"**{conv['title']}** &nbsp; {arch_pill}", unsafe_allow_html=True)
     st.markdown("---")
 
-    # Chat history
+    # Chat history — assistant = subscriber (model), user = Jasmin (you)
     messages = db.get_messages(st.session_state.active_conv_id)
     for msg in messages:
         role = msg["role"]
         if role == "assistant":
-            # Subscriber (bot) — use archetype icon
             with st.chat_message("assistant", avatar=f":material/{arch['icon']}:"):
                 st.markdown(msg["content"])
         else:
-            # Jasmin (you) — face icon
             with st.chat_message("user", avatar=":material/face_5:"):
                 st.markdown(msg["content"])
 
     # Input — user types as Jasmin
-    prompt = st.chat_input("Message as Jasmin…")
+    prompt = st.chat_input("Reply as Jasmin…")
     if prompt:
         db.add_message(st.session_state.active_conv_id, "user", prompt)
 

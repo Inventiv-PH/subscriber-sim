@@ -20,32 +20,24 @@ ADAPTER_PATH = os.getenv(
     os.path.join(os.path.dirname(__file__), "..", "models", "adapter"),
 )
 
-# Generation params — defaults, then per-archetype overrides
+# Generation params — match training notebook exactly (Cell 4 / Cell 10)
+# temperature=0.85, top_p=0.9, max_new_tokens=150, repetition_penalty=1.1
 _DEFAULT_PARAMS = dict(
-    max_tokens=110,
-    temperature=0.95,
-    top_p=0.95,
+    max_tokens=150,
+    temperature=0.85,
+    top_p=0.9,
     rep_pen=1.1,
-    stop=["\n\n", "Jasmin:", "Assistant:", "---"],
+    stop=[],
 )
 
-# Subscriber reply style adapts to archetype:
-#   cold      → very short (match their one-word energy)
-#   horny     → longer, more explicit
-#   simp      → warm, expressive
-#   troll     → punchy, sarcastic
-#   whale     → engaged, premium-feeling
-#   cheapskate→ persistent, medium length
-#   casual    → relaxed, conversational
+# Per-archetype overrides — cold gets shorter replies to match its one-word energy
 _ARCHETYPE_PARAMS = {
-    "cold":       dict(max_tokens=35,  temperature=0.75, top_p=0.88, rep_pen=1.0),   # short + no rep_pen
-    "horny":      dict(max_tokens=130, temperature=1.05, top_p=0.95, rep_pen=1.05),
-    "simp":       dict(max_tokens=130, temperature=0.9,  top_p=0.95, rep_pen=1.1),
-    "troll":      dict(max_tokens=70,  temperature=1.05, top_p=0.95, rep_pen=1.0),   # punchy + no rep_pen
-    "whale":      dict(max_tokens=110, temperature=0.85, top_p=0.90, rep_pen=1.1),
-    "cheapskate": dict(max_tokens=100, temperature=0.95, top_p=0.95, rep_pen=1.1),
-    "casual":     dict(max_tokens=115, temperature=0.9,  top_p=0.95, rep_pen=1.1),
+    "cold": dict(max_tokens=10, temperature=0.75, top_p=0.88),
 }
+
+# Seed sent as the user turn to prompt the subscriber's dynamic opening message.
+# Matches the exact prompt used in notebook Cell 5 generate_dynamic_opener().
+_OPENER_SEED = "Generate ONE unique opening message to start a chat with Jasmin. Be brief (1-2 sentences max). Just the message, nothing else."
 
 # Keep only the last N turns to limit prompt size and Modal GPU time
 _MAX_HISTORY_TURNS = 8
@@ -145,6 +137,8 @@ def _stream_modal(history: list[dict], archetype_key: str) -> Generator[str, Non
     try:
         model = _get_modal_model()
         chat = [{"role": m["role"], "content": m["content"]} for m in _trim_history(history)]
+        if not chat:
+            chat = [{"role": "user", "content": _OPENER_SEED}]
         system = get_subscriber_system(archetype_key)
         messages = [{"role": "system", "content": system}] + chat
         p = _params(archetype_key)
@@ -169,6 +163,8 @@ def _stream_mlx(history: list[dict], archetype_key: str) -> Generator[str, None,
     import httpx
 
     chat = [{"role": m["role"], "content": m["content"]} for m in history]
+    if not chat:
+        chat = [{"role": "user", "content": _OPENER_SEED}]
     system = get_subscriber_system(archetype_key)
     p = _params(archetype_key)
     payload = {
@@ -179,8 +175,9 @@ def _stream_mlx(history: list[dict], archetype_key: str) -> Generator[str, None,
         "temperature": p["temperature"],
         "top_p": p["top_p"],
         "repetition_penalty": p["rep_pen"],
-        "stop": p["stop"],
     }
+    if p["stop"]:
+        payload["stop"] = p["stop"]
 
     try:
         with httpx.stream("POST", f"{MLX_URL}/v1/chat/completions",
