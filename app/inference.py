@@ -2,7 +2,7 @@ import os
 import threading
 from collections.abc import Generator
 
-from archetypes import get_jasmin_system, get_jasmin_opening_system
+from archetypes import get_subscriber_system
 
 # ── Backend selection ─────────────────────────────────────────────────────────
 # Set INFERENCE_BACKEND=modal to use Modal GPU client.
@@ -26,16 +26,16 @@ _DEFAULT_PARAMS = dict(
     temperature=0.95,
     top_p=0.95,
     rep_pen=1.1,
-    stop=["\n\n", "Subscriber:", "User:", "---", "Assistant:"],
+    stop=["\n\n", "Jasmin:", "Assistant:", "---"],
 )
 
-# Jasmin's reply style adapts to who she's talking to:
-#   cold      → short, restrained (match their energy)
-#   horny     → longer, creative, hotter
-#   simp      → warm, a bit longer, expressive
-#   troll     → punchy, slightly unpredictable
-#   whale     → focused, premium-feeling
-#   cheapskate→ firm and playful, medium length
+# Subscriber reply style adapts to archetype:
+#   cold      → very short (match their one-word energy)
+#   horny     → longer, more explicit
+#   simp      → warm, expressive
+#   troll     → punchy, sarcastic
+#   whale     → engaged, premium-feeling
+#   cheapskate→ persistent, medium length
 #   casual    → relaxed, conversational
 _ARCHETYPE_PARAMS = {
     "cold":       dict(max_tokens=35,  temperature=0.75, top_p=0.88, rep_pen=1.0),   # short + no rep_pen
@@ -93,8 +93,7 @@ def _stream_adapter(history: list[dict], archetype_key: str) -> Generator[str, N
     try:
         model, tokenizer = _load_adapter()
         chat = [{"role": m["role"], "content": m["content"]} for m in history]
-        is_opening = not chat
-        system = get_jasmin_opening_system(archetype_key) if is_opening else get_jasmin_system(archetype_key)
+        system = get_subscriber_system(archetype_key)
         messages = [{"role": "system", "content": system}] + chat
 
         input_ids = tokenizer.apply_chat_template(
@@ -146,7 +145,7 @@ def _stream_modal(history: list[dict], archetype_key: str) -> Generator[str, Non
     try:
         model = _get_modal_model()
         chat = [{"role": m["role"], "content": m["content"]} for m in _trim_history(history)]
-        system = get_jasmin_opening_system(archetype_key) if not chat else get_jasmin_system(archetype_key)
+        system = get_subscriber_system(archetype_key)
         messages = [{"role": "system", "content": system}] + chat
         p = _params(archetype_key)
         for token in model.generate.remote_gen(
@@ -170,7 +169,7 @@ def _stream_mlx(history: list[dict], archetype_key: str) -> Generator[str, None,
     import httpx
 
     chat = [{"role": m["role"], "content": m["content"]} for m in history]
-    system = get_jasmin_opening_system(archetype_key) if not chat else get_jasmin_system(archetype_key)
+    system = get_subscriber_system(archetype_key)
     p = _params(archetype_key)
     payload = {
         "model": MODEL_NAME,

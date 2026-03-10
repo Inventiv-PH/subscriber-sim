@@ -114,8 +114,7 @@ if _pick and _pick in ARCHETYPES:
         _arch_p = ARCHETYPES[_pick]
         _title_p = f"{_arch_p['label']} · {datetime.now().strftime('%b %d %H:%M')}"
         _conv_p = db.create_conversation(_title_p, _pick)
-        _resp_p = "".join(inference.stream_response([], _pick))
-        db.add_message(_conv_p["id"], "assistant", _resp_p)
+        db.add_message(_conv_p["id"], "assistant", _arch_p["opener"])
         st.session_state.active_conv_id = _conv_p["id"]
         st.session_state.show_new_conv = False
     st.rerun()
@@ -249,9 +248,7 @@ def _start_new_conv(archetype_key: str) -> None:
     arch = ARCHETYPES[archetype_key]
     title = f"{arch['label']} · {_ts()}"
     conv = db.create_conversation(title, archetype_key)
-    # Pass empty history — inference uses get_jasmin_opening_system and no user message
-    full_response = "".join(inference.stream_response([], archetype_key))
-    db.add_message(conv["id"], "assistant", full_response)
+    db.add_message(conv["id"], "assistant", arch["opener"])
     st.session_state.active_conv_id = conv["id"]
     st.session_state.show_new_conv = False
 
@@ -325,7 +322,7 @@ with st.sidebar:
 # ── New conversation: archetype picker ───────────────────────────────────────
 if st.session_state.show_new_conv:
     st.markdown("## New Conversation")
-    st.markdown("Choose a subscriber archetype to simulate:")
+    st.markdown("Choose a subscriber type — you'll play Jasmin responding to them:")
     st.html(_arch_grid_html())
 
 # ── Active conversation: chat view ───────────────────────────────────────────
@@ -349,21 +346,27 @@ elif st.session_state.active_conv_id:
     messages = db.get_messages(st.session_state.active_conv_id)
     for msg in messages:
         role = msg["role"]
-        with st.chat_message(role, avatar=":material/face_5:" if role == "assistant" else None):
-            st.markdown(msg["content"])
+        if role == "assistant":
+            # Subscriber (bot) — use archetype icon
+            with st.chat_message("assistant", avatar=f":material/{arch['icon']}:"):
+                st.markdown(msg["content"])
+        else:
+            # Jasmin (you) — face icon
+            with st.chat_message("user", avatar=":material/face_5:"):
+                st.markdown(msg["content"])
 
-    # Input
-    prompt = st.chat_input(f"Reply as {arch['label']} subscriber…")
+    # Input — user types as Jasmin
+    prompt = st.chat_input("Message as Jasmin…")
     if prompt:
         db.add_message(st.session_state.active_conv_id, "user", prompt)
 
-        with st.chat_message("user"):
+        with st.chat_message("user", avatar=":material/face_5:"):
             st.markdown(prompt)
 
         updated_history = db.get_messages(st.session_state.active_conv_id)
         history_for_model = [{"role": m["role"], "content": m["content"]} for m in updated_history]
 
-        with st.chat_message("assistant", avatar=":material/face_5:"):
+        with st.chat_message("assistant", avatar=f":material/{arch['icon']}:"):
             placeholder = st.empty()
             placeholder.markdown(
                 '<div class="typing-indicator"><span></span><span></span><span></span></div>',
@@ -384,5 +387,5 @@ elif st.session_state.active_conv_id:
 else:
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown("## Jasmin Chat Sim")
-    st.markdown("Fine-tuned subscriber simulation. Pick an archetype to start a conversation.")
+    st.markdown("Practice responding as Jasmin. Pick a subscriber type to start.")
     st.html(_arch_grid_html())
