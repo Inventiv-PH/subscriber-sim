@@ -96,6 +96,35 @@ def _filter_response(text: str, archetype_key: str) -> str:
 
 _health_cache: dict = {}
 
+# ── Training data deduplication ────────────────────────────────────────────────
+# Load all assistant messages from training JSONL files into a set so generated
+# responses can be checked against them. Memorised training examples are rejected
+# and the retry loop regenerates with higher params.
+
+def _load_training_responses() -> set[str]:
+    import json
+    from pathlib import Path
+    seen: set[str] = set()
+    data_dir = Path(os.getenv("DATA_DIR", "/app/data"))
+    for jsonl_path in data_dir.glob("*.jsonl"):
+        try:
+            with jsonl_path.open() as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    session = json.loads(line)
+                    for msg in session.get("messages", []):
+                        if msg.get("role") == "assistant":
+                            seen.add(msg["content"].strip())
+        except Exception as e:
+            log.warning("Could not load training data from %s: %s", jsonl_path, e)
+    log.info("Loaded %d training assistant messages for deduplication", len(seen))
+    return seen
+
+
+_TRAINING_RESPONSES: set[str] = _load_training_responses()
+
 
 def _params(archetype_key: str) -> dict:
     return {**_DEFAULT_PARAMS, **_ARCHETYPE_PARAMS.get(archetype_key, {})}
@@ -126,16 +155,21 @@ def _get_modal_model():
 
 
 def _is_looping(chat: list[dict], n: int = 2) -> bool:
-    """Return True if the last n messages of either role are identical.
+    """Return True if the conversation is stuck in a repetition pattern.
 
-    Checks both Jasmin (user) and subscriber (assistant) sides — the loop can
-    originate from either direction.
+    Detects two cases:
+    - Exact repeat: last n messages from either role are identical (A,A)
+    - 2-cycle alternation: subscriber rotates between two messages (A,B,A,B)
     """
     user_msgs = [m["content"].split("\n\n")[0] for m in chat if m["role"] == "user"]
     if len(user_msgs) >= n and len(set(user_msgs[-n:])) == 1:
         return True
     asst_msgs = [m["content"] for m in chat if m["role"] == "assistant"]
+    # Exact repeat
     if len(asst_msgs) >= n and len(set(asst_msgs[-n:])) == 1:
+        return True
+    # 2-cycle: A,B,A,B — last message matches the one two steps back
+    if len(asst_msgs) >= 4 and asst_msgs[-1] == asst_msgs[-3] and asst_msgs[-2] == asst_msgs[-4]:
         return True
     return False
 
@@ -167,15 +201,12 @@ def _stream_modal(history: list[dict], archetype_key: str) -> Generator[str, Non
         system = _SUBSCRIBER_SYSTEMS.get(archetype_key, _SUBSCRIBER_SYSTEMS["casual"])
         messages = [{"role": "system", "content": system}] + chat
         p = _params(archetype_key)
-        # When looping, boost rep_pen and temperature to force variety.
-        # Text-only cues are insufficient — the model needs sampling pressure.
         if looping:
             p = {
                 **p,
                 "rep_pen":     min(p["rep_pen"] + 0.20, 1.40),
                 "temperature": min(p["temperature"] + 0.15, 1.0),
             }
-            log.info("loop params: temp=%.2f rep_pen=%.2f", p["temperature"], p["rep_pen"])
         log.info("system prompt: %d chars | msgs to model: %d", len(system), len(messages))
         log.info("params: max_tokens=%s temp=%.2f top_p=%.2f rep_pen=%.2f",
                  p["max_tokens"], p["temperature"], p["top_p"], p["rep_pen"])
@@ -306,12 +337,16 @@ def health_check() -> bool:
 
 def stream_response(history: list[dict], archetype_key: str) -> Generator[str, None, None]:
     """Stream subscriber response tokens, then apply OOC post-processing on the full text."""
-    stream = _stream_modal(history, archetype_key)
-
-    # Collect full response then yield filtered text as one chunk.
-    # Filtering operates on the complete output — can't filter mid-stream.
-    full = "".join(stream)
+    full = "".join(_stream_modal(history, archetype_key))
     log.info("raw model output (%d chars): %.120s", len(full), full)
     filtered = _filter_response(full, archetype_key)
     log.info("filtered response (%d chars): %.120s", len(filtered), filtered)
+
+    # Observability only — no retries (each retry = one Modal call)
+    recent = [m["content"] for m in history if m["role"] == "assistant"][-4:]
+    if filtered in recent:
+        log.warning("[%s] response matches recent history", archetype_key)
+    elif filtered in _TRAINING_RESPONSES:
+        log.warning("[%s] response matches training data", archetype_key)
+
     yield filtered
