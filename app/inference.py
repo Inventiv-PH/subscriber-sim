@@ -1,55 +1,97 @@
+import logging
 import os
-import threading
+import re
 from collections.abc import Generator
 
-from archetypes import get_subscriber_system
-
-# ── Backend selection ─────────────────────────────────────────────────────────
-# Set INFERENCE_BACKEND=modal to use Modal GPU client.
-# Set INFERENCE_BACKEND=adapter to use the local LoRA adapter (models/adapter).
-# Default is "mlx" (local MLX server via HTTP).
-BACKEND = os.getenv("INFERENCE_BACKEND", "mlx")
-
-# MLX HTTP server settings (used when BACKEND=mlx)
-MLX_URL    = os.getenv("MLX_SERVER_URL", "http://localhost:8080")
-MODEL_NAME = os.getenv("MODEL_NAME", "mlx-community/Meta-Llama-3.1-8B-Instruct-4bit")
-
-# Local adapter settings (used when BACKEND=adapter)
-ADAPTER_PATH = os.getenv(
-    "ADAPTER_PATH",
-    os.path.join(os.path.dirname(__file__), "..", "models", "adapter"),
+from archetypes import (
+    ARCHETYPES,
+    _SUBSCRIBER_SYSTEMS,
+    get_archetype_mid_convo_reminder,
 )
 
-# Generation params — match training notebook exactly (Cell 4 / Cell 10)
-# temperature=0.85, top_p=0.9, max_new_tokens=150, repetition_penalty=1.1
+# ── Logging ────────────────────────────────────────────────────────────────────
+log = logging.getLogger("subscriber_sim")
+if not log.handlers:
+    _h = logging.StreamHandler()  # stdout → Docker logs
+    _h.setFormatter(logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S"
+    ))
+    log.addHandler(_h)
+    log.setLevel(logging.DEBUG if os.getenv("DEBUG") else logging.INFO)
+
+# ── Backend ────────────────────────────────────────────────────────────────────
+# All inference runs on Modal GPU (jasmin-inference app).
+
+# Generation params — defaults (overridden per-archetype below)
 _DEFAULT_PARAMS = dict(
-    max_tokens=150,
-    temperature=0.85,
-    top_p=0.9,
-    rep_pen=1.1,
-    stop=[],
+    max_tokens=100,
+    temperature=0.75,
+    top_p=0.85,
+    rep_pen=1.05,
+    stop=["\n\nJasmin:", "\n\nUser:", "\n\n["],
 )
 
-# Per-archetype overrides — cold gets shorter replies to match its one-word energy
+# Per-archetype generation params from subscriber_sim_v2.ipynb
+# Tighter params = more consistent archetype adherence
 _ARCHETYPE_PARAMS = {
-    "cold": dict(max_tokens=10, temperature=0.75, top_p=0.88),
+    "horny":      dict(max_tokens=80,  temperature=0.75, top_p=0.85, rep_pen=1.05),
+    "cheapskate": dict(max_tokens=100, temperature=0.70, top_p=0.80, rep_pen=1.00),
+    "casual":     dict(max_tokens=75,  temperature=0.65, top_p=0.80, rep_pen=1.00),
+    "troll":      dict(max_tokens=85,  temperature=0.80, top_p=0.90, rep_pen=1.15),
+    "whale":      dict(max_tokens=90,  temperature=0.65, top_p=0.75, rep_pen=1.05),
+    "cold":       dict(max_tokens=15,  temperature=0.60, top_p=0.70, rep_pen=1.00),
+    "simp":       dict(max_tokens=95,  temperature=0.75, top_p=0.85, rep_pen=1.00),
 }
 
-# Per-archetype opener seeds.
-# Written as Jasmin's "trigger" line — the model reacts to this as the subscriber,
-# which produces far more in-character openers than instructional prompts.
-_OPENER_SEEDS = {
-    "horny":      "hey 😏 just saw u subscribed... what's on ur mind",
-    "cheapskate": "hey! welcome, so glad u found the page 😊 lmk if u have any questions",
-    "casual":     "hey! thanks for subbing 🙈 how's ur day going?",
-    "troll":      "oh hey, didn't expect a message — what's up",
-    "whale":      "hey 💎 welcome, so glad u found me — what are u looking for?",
-    "cold":       "hey, u there?",
-    "simp":       "omg hey!! thanks for subbing that actually means a lot 🥺",
+# Keep last 6 messages (3 full exchanges) — matches subscriber_sim_v2 context window
+_MAX_HISTORY_TURNS = 6
+
+# ── Response post-processor ────────────────────────────────────────────────────
+# Removes OOC (out-of-character) artifacts — mirrors ResponseFilter from v2 notebook.
+
+_META_PATTERNS = [
+    r"(?:I'm|I am) (?:an|a) (?:AI|bot|model|language model|assistant)",
+    r"(?:As an|As a) (?:AI|bot|model|language model|assistant)",
+    r"I (?:should|shouldn't|need to|must|cannot|can't) ",
+    r"I (?:can't|cannot) (?:roleplay|pretend)",
+    r"^(?:I understand|I realize|I appreciate that)",
+    r"^(?:Let me|I'll|I would) roleplay",
+    r"I (?:must )?(?:maintain|keep) (?:appropriate|professional)",
+]
+
+_MAX_SENTENCES = {
+    "horny": 3, "cheapskate": 3, "casual": 3,
+    "troll": 2, "whale": 2,     "simp": 4, "cold": 1,
 }
 
-# Keep only the last N turns to limit prompt size and Modal GPU time
-_MAX_HISTORY_TURNS = 8
+
+def _filter_response(text: str, archetype_key: str) -> str:
+    """Post-process model output to strip OOC content and enforce length."""
+    if not text or not text.strip():
+        return text
+    out = text.strip()
+    # Strip hallucinated subscriber name prefixes (e.g. "JO ", "Da ", "BP ")
+    out = re.sub(r"^[A-Z][A-Za-z]{0,2}\s+(?=[A-Z])", "", out)
+    for pat in _META_PATTERNS:
+        out = re.sub(pat, "", out, flags=re.IGNORECASE)
+    out = out.strip()
+    # Strip surrounding quotes
+    if (out.startswith('"') and out.endswith('"')) or \
+       (out.startswith("'") and out.endswith("'")):
+        out = out[1:-1].strip()
+    # Enforce max sentence count
+    max_s = _MAX_SENTENCES.get(archetype_key, 3)
+    sentences = [s.strip() for s in out.split(". ") if s.strip()]
+    if len(sentences) > max_s:
+        out = ". ".join(sentences[:max_s])
+        if not out[-1] in ".!?":
+            out += "."
+    # Reduce excessive punctuation
+    out = re.sub(r"([!?.♥💦🔥])\1{2,}", r"\1\1", out)
+    out = re.sub(r"\.\.\.+", "..", out)
+    # Strip leading action asterisks
+    out = re.sub(r"^\*+\s*", "", out)
+    return out.strip() or text.strip()
 
 _health_cache: dict = {}
 
@@ -64,93 +106,15 @@ def _trim_history(history: list[dict]) -> list[dict]:
     return history[-max_msgs:] if len(history) > max_msgs else history
 
 
-def _normalize_history(history: list[dict], archetype_key: str) -> list[dict]:
-    """Ensure the chat always starts with a user turn.
+def _normalize_history(history: list[dict]) -> list[dict]:
+    """Trim history to cap prompt tokens.
 
-    The opener is saved to DB as role=assistant with no preceding user message.
-    Without a user turn first, the chat template produces a malformed prompt
-    and the model loses track of which archetype it's playing.
-    We prepend the archetype-specific opener seed so the structure is always:
-        user (seed) → assistant (opener) → user → assistant → …
+    Training data allows assistant-first sequences (opener is always the first
+    assistant turn with no preceding user message). Llama-3 chat template handles
+    this natively — no seed injection needed.
     """
-    if not history:
-        return history
-    if history[0]["role"] == "assistant":
-        seed = _OPENER_SEEDS.get(archetype_key, _OPENER_SEEDS["casual"])
-        return [{"role": "user", "content": seed}] + history
-    return history
+    return list(_trim_history(history))
 
-
-
-# ── Local adapter backend ────────────────────────────────────────────────────
-_adapter_model = None
-_adapter_tokenizer = None
-
-
-def _load_adapter():
-    global _adapter_model, _adapter_tokenizer
-    if _adapter_model is None:
-        from transformers import AutoModelForCausalLM, AutoTokenizer
-        from peft import PeftModel
-
-        adapter_path = os.path.abspath(ADAPTER_PATH)
-        _adapter_tokenizer = AutoTokenizer.from_pretrained(adapter_path)
-        base = AutoModelForCausalLM.from_pretrained(
-            "unsloth/meta-llama-3.1-8b-instruct-bnb-4bit",
-            device_map="auto",
-            load_in_4bit=True,
-        )
-        _adapter_model = PeftModel.from_pretrained(base, adapter_path)
-        _adapter_model.eval()
-    return _adapter_model, _adapter_tokenizer
-
-
-def _stream_adapter(history: list[dict], archetype_key: str) -> Generator[str, None, None]:
-    from transformers import TextIteratorStreamer
-
-    try:
-        model, tokenizer = _load_adapter()
-        normalized = _normalize_history(history, archetype_key)
-        chat = [{"role": m["role"], "content": m["content"]} for m in normalized]
-        system = get_subscriber_system(archetype_key)
-        messages = [{"role": "system", "content": system}] + chat
-
-        input_ids = tokenizer.apply_chat_template(
-            messages, add_generation_prompt=True, return_tensors="pt"
-        ).to(model.device)
-
-        p = _params(archetype_key)
-        streamer = TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
-        gen_kwargs = dict(
-            input_ids=input_ids,
-            streamer=streamer,
-            max_new_tokens=p["max_tokens"],
-            temperature=p["temperature"],
-            top_p=p["top_p"],
-            repetition_penalty=p["rep_pen"],
-            do_sample=True,
-        )
-        thread = threading.Thread(target=model.generate, kwargs=gen_kwargs)
-        thread.start()
-
-        buffer = ""
-        for token in streamer:
-            buffer += token
-            stop_hit = False
-            for stop in p["stop"]:
-                if stop in buffer:
-                    yield buffer[: buffer.index(stop)]
-                    stop_hit = True
-                    break
-            if stop_hit:
-                break
-            yield token
-
-        thread.join()
-    except Exception as e:
-        msg = f"⚠️ Adapter error: {e}"
-        print(msg, flush=True)
-        yield msg
 
 
 # ── Modal backend ─────────────────────────────────────────────────────────────
@@ -160,16 +124,37 @@ def _get_modal_model():
     return cls()
 
 
+def _inject_mid_convo_reminder(chat: list[dict], archetype_key: str) -> list[dict]:
+    """Append an archetype reminder to the last user message after 3+ exchanges."""
+    if len(chat) < _MAX_HISTORY_TURNS:
+        log.debug("mid-convo reminder skipped (%d msgs < %d threshold)", len(chat), _MAX_HISTORY_TURNS)
+        return chat
+    reminder = get_archetype_mid_convo_reminder(archetype_key)
+    if not reminder:
+        return chat
+    # Find last user message and append reminder at maximum recency
+    for i in range(len(chat) - 1, -1, -1):
+        if chat[i]["role"] == "user":
+            chat[i] = {**chat[i], "content": chat[i]["content"] + "\n\n" + reminder}
+            log.info("injected mid-convo reminder for [%s] at msg index %d", archetype_key, i)
+            break
+    return chat
+
+
 def _stream_modal(history: list[dict], archetype_key: str) -> Generator[str, None, None]:
+    log.info("── stream_modal [%s] ── history: %d msgs", archetype_key, len(history))
     try:
         model = _get_modal_model()
-        normalized = _normalize_history(_trim_history(history), archetype_key)
+        normalized = _normalize_history(history)
         chat = [{"role": m["role"], "content": m["content"]} for m in normalized]
-        if not chat:
-            chat = [{"role": "user", "content": _OPENER_SEEDS.get(archetype_key, _OPENER_SEEDS["casual"])}]
-        system = get_subscriber_system(archetype_key)
+        chat = _inject_mid_convo_reminder(chat, archetype_key)
+        system = _SUBSCRIBER_SYSTEMS.get(archetype_key, _SUBSCRIBER_SYSTEMS["casual"])
         messages = [{"role": "system", "content": system}] + chat
         p = _params(archetype_key)
+        log.info("system prompt: %d chars | msgs to model: %d", len(system), len(messages))
+        log.info("params: max_tokens=%s temp=%.2f top_p=%.2f rep_pen=%.2f",
+                 p["max_tokens"], p["temperature"], p["top_p"], p["rep_pen"])
+        log.debug("last user msg: %.200s", chat[-1]["content"] if chat else "(empty)")
         for token in model.generate.remote_gen(
             messages,
             stop=p["stop"],
@@ -180,110 +165,61 @@ def _stream_modal(history: list[dict], archetype_key: str) -> Generator[str, Non
         ):
             yield token
     except Exception as e:
-        msg = f"⚠️ Modal error: {e}"
-        print(msg, flush=True)
-        yield msg
-
-
-# ── MLX HTTP backend ──────────────────────────────────────────────────────────
-def _stream_mlx(history: list[dict], archetype_key: str) -> Generator[str, None, None]:
-    import json
-    import httpx
-
-    normalized = _normalize_history(history, archetype_key)
-    chat = [{"role": m["role"], "content": m["content"]} for m in normalized]
-    if not chat:
-        chat = [{"role": "user", "content": _OPENER_SEEDS.get(archetype_key, _OPENER_SEEDS["casual"])}]
-    system = get_subscriber_system(archetype_key)
-    p = _params(archetype_key)
-    payload = {
-        "model": MODEL_NAME,
-        "messages": [{"role": "system", "content": system}] + chat,
-        "stream": True,
-        "max_tokens": p["max_tokens"],
-        "temperature": p["temperature"],
-        "top_p": p["top_p"],
-        "repetition_penalty": p["rep_pen"],
-    }
-    if p["stop"]:
-        payload["stop"] = p["stop"]
-
-    try:
-        with httpx.stream("POST", f"{MLX_URL}/v1/chat/completions",
-                          json=payload, timeout=60.0) as resp:
-            if resp.status_code != 200:
-                body = resp.read().decode(errors="replace")[:300]
-                msg = f"⚠️ Server error {resp.status_code}: {body}"
-                print(msg, flush=True)
-                yield msg
-                return
-            for line in resp.iter_lines():
-                if not line or not line.startswith("data: "):
-                    continue
-                data = line[6:]
-                if data.strip() == "[DONE]":
-                    break
-                try:
-                    content = json.loads(data)["choices"][0]["delta"].get("content", "")
-                    if content:
-                        yield content
-                except (json.JSONDecodeError, KeyError, IndexError):
-                    continue
-    except httpx.ConnectError:
-        yield f"⚠️ Cannot connect to MLX server at {MLX_URL}. Run `./start_mlx_server.sh` first."
-    except Exception as e:
-        msg = f"⚠️ Unexpected error: {type(e).__name__}: {e}"
-        print(msg, flush=True)
-        yield msg
+        log.error("Modal error: %s", e, exc_info=True)
+        yield f"⚠️ Modal error: {e}"
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
-def generate_opener(archetype_key: str) -> str:
-    """Generate a dynamic opening message for the given archetype.
+def _static_opener(archetype_key: str) -> str:
+    """Return the static opener for the archetype — matches training data."""
+    return ARCHETYPES[archetype_key]["opener"]
 
-    Uses an archetype-specific seed so the model stays firmly in character.
-    Falls back to the static ARCHETYPES opener on any error.
+
+def stream_opener(archetype_key: str) -> Generator[str, None, None]:
+    """Yield the static opener for the archetype.
+
+    Training sessions always started with a fixed opener (no preceding Jasmin
+    message). Using the static opener ensures inference starts in the exact same
+    distribution as training data.
     """
-    from archetypes import ARCHETYPES
-    seed = _OPENER_SEEDS.get(archetype_key, _OPENER_SEEDS["casual"])
-    try:
-        seed_history = [{"role": "user", "content": seed}]
-        result = "".join(stream_response(seed_history, archetype_key)).strip()
-        return result or ARCHETYPES[archetype_key]["opener"]
-    except Exception as e:
-        print(f"⚠️ generate_opener failed ({archetype_key}): {e}", flush=True)
-        return ARCHETYPES[archetype_key]["opener"]
+    opener = _static_opener(archetype_key)
+    log.info("── stream_opener [%s] ── static opener: %.80s", archetype_key, opener)
+    yield opener
+
+
+def generate_opener(archetype_key: str) -> str:
+    """Return the static opener for the archetype.
+
+    Training data always used fixed openers — dynamic generation introduced
+    a distribution mismatch. Static openers are always in-character and instant.
+    """
+    return ARCHETYPES[archetype_key]["opener"]
 
 
 def health_check() -> bool:
-    """Check backend health. Modal result is cached for 60s to avoid per-render overhead."""
+    """Check Modal backend health. Result is cached for 60s to avoid per-render overhead."""
     import time
-    if BACKEND == "modal":
-        cached = _health_cache.get("modal")
-        if cached and time.time() - cached["ts"] < 60:
-            return cached["ok"]
-        try:
-            import modal
-            modal.Cls.from_name("jasmin-inference", "JasminModel")
-            result = True
-        except Exception:
-            result = False
-        _health_cache["modal"] = {"ok": result, "ts": time.time()}
-        return result
-    elif BACKEND == "adapter":
-        return os.path.isfile(os.path.join(os.path.abspath(ADAPTER_PATH), "adapter_config.json"))
-    else:
-        import httpx
-        try:
-            return httpx.get(f"{MLX_URL}/v1/models", timeout=2.0).status_code == 200
-        except Exception:
-            return False
+    cached = _health_cache.get("modal")
+    if cached and time.time() - cached["ts"] < 60:
+        return cached["ok"]
+    try:
+        import modal
+        modal.Cls.from_name("jasmin-inference", "JasminModel")
+        result = True
+    except Exception:
+        result = False
+    _health_cache["modal"] = {"ok": result, "ts": time.time()}
+    return result
 
 
 def stream_response(history: list[dict], archetype_key: str) -> Generator[str, None, None]:
-    if BACKEND == "modal":
-        yield from _stream_modal(history, archetype_key)
-    elif BACKEND == "adapter":
-        yield from _stream_adapter(history, archetype_key)
-    else:
-        yield from _stream_mlx(history, archetype_key)
+    """Stream subscriber response tokens, then apply OOC post-processing on the full text."""
+    stream = _stream_modal(history, archetype_key)
+
+    # Collect full response then yield filtered text as one chunk.
+    # Filtering operates on the complete output — can't filter mid-stream.
+    full = "".join(stream)
+    log.info("raw model output (%d chars): %.120s", len(full), full)
+    filtered = _filter_response(full, archetype_key)
+    log.info("filtered response (%d chars): %.120s", len(filtered), filtered)
+    yield filtered

@@ -103,6 +103,8 @@ if "show_new_conv" not in st.session_state:
     st.session_state.show_new_conv = st.query_params.get("view") == "new"
 if "editing_title" not in st.session_state:
     st.session_state.editing_title = None
+if "pending_opener" not in st.session_state:
+    st.session_state.pending_opener = None
 
 # ── Handle archetype picker click (query param set by HTML grid) ──────────────
 _pick = st.query_params.get("pick")
@@ -112,12 +114,11 @@ if _pick and _pick in ARCHETYPES:
     st.session_state.show_new_conv = False
     st.session_state.editing_title = None
     st.query_params.clear()
-    with st.spinner("Starting conversation…"):
-        _arch_p = ARCHETYPES[_pick]
-        _title_p = f"{_arch_p['label']} · {datetime.now().strftime('%b %d %H:%M')}"
-        _conv_p = db.create_conversation(_title_p, _pick)
-        db.add_message(_conv_p["id"], "assistant", inference.generate_opener(_pick))
-        st.session_state.active_conv_id = _conv_p["id"]
+    _arch_p = ARCHETYPES[_pick]
+    _title_p = f"{_arch_p['label']} · {datetime.now().strftime('%b %d %H:%M')}"
+    _conv_p = db.create_conversation(_title_p, _pick)
+    st.session_state.active_conv_id = _conv_p["id"]
+    st.session_state.pending_opener = _pick
     st.rerun()
 
 # ── Sync URL to current state ─────────────────────────────────────────────────
@@ -253,8 +254,8 @@ def _start_new_conv(archetype_key: str) -> None:
     arch = ARCHETYPES[archetype_key]
     title = f"{arch['label']} · {_ts()}"
     conv = db.create_conversation(title, archetype_key)
-    db.add_message(conv["id"], "assistant", inference.generate_opener(archetype_key))
     st.session_state.active_conv_id = conv["id"]
+    st.session_state.pending_opener = archetype_key
 
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
@@ -362,6 +363,31 @@ elif st.session_state.active_conv_id:
         else:
             with st.chat_message("user", avatar=":material/face_5:"):
                 st.markdown(msg["content"])
+
+    # Stream dynamic opener for newly created conversations
+    if st.session_state.get("pending_opener"):
+        _opener_arch = st.session_state.pending_opener
+        st.session_state.pending_opener = None
+        with st.chat_message("assistant", avatar=f":material/{arch['icon']}:"):
+            placeholder = st.empty()
+            placeholder.markdown(
+                '<div class="typing-indicator"><span></span><span></span><span></span></div>',
+                unsafe_allow_html=True,
+            )
+            full_opener = ""
+            try:
+                for chunk in inference.stream_opener(_opener_arch):
+                    if not full_opener:
+                        placeholder.empty()
+                    full_opener += chunk
+                    placeholder.markdown(full_opener + " ▌")
+            except Exception:
+                full_opener = inference.generate_opener(_opener_arch)
+            if not full_opener or not full_opener.strip():
+                full_opener = inference.generate_opener(_opener_arch)
+            placeholder.markdown(full_opener)
+        db.add_message(st.session_state.active_conv_id, "assistant", full_opener)
+        st.rerun()
 
     # Input — user types as Jasmin
     prompt = st.chat_input("Reply as Jasmin…")

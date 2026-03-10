@@ -81,13 +81,18 @@ class JasminModel:
 
     @modal.method()
     def generate(self, messages: list[dict], stop: list[str], max_tokens: int,
-                 temperature: float, top_p: float, rep_pen: float):
+                 temperature: float, top_p: float, rep_pen: float,
+                 prefill: str = ""):
         """Yields response tokens — call with .remote_gen() from the client."""
         from transformers import TextIteratorStreamer
 
         text = self.tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
+        # Append prefill text directly after the generation prompt header so
+        # the model is forced to continue from an in-character seed token.
+        if prefill:
+            text += prefill
         inputs = self.tokenizer(text, return_tensors="pt").to(self.model.device)
 
         # Short replies: skip thread+streamer overhead, generate synchronously
