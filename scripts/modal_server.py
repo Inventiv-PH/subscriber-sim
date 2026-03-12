@@ -2,19 +2,24 @@
 Modal GPU compute — Jasmin inference.
 
 Deploy once:
+    modal volume put jasmin-model models/adapter/ /adapter/
     modal deploy scripts/modal_server.py
 
 The Streamlit app calls this directly via Modal client (no HTTP server needed).
 """
 
-from pathlib import Path
 from threading import Thread
 
 import modal
 
-app  = modal.App("jasmin-inference")
+app = modal.App("jasmin-inference")
 
-MERGED_MODEL_DIR = Path(__file__).parent.parent / "models" / "merged-16bit"
+BASE_MODEL = "unsloth/meta-llama-3.1-8b-instruct-bnb-4bit"
+
+# Modal Volume — upload adapter once with:
+#   modal volume put jasmin-model models/adapter/ /adapter/
+model_volume = modal.Volume.from_name("jasmin-model", create_if_missing=True)
+ADAPTER_PATH = "/adapter"
 
 image = (
     modal.Image.from_registry(
@@ -24,18 +29,21 @@ image = (
     .pip_install(
         "torch>=2.4.0",
         "transformers>=4.40.0",
+        "tokenizers>=0.19.0",
         "accelerate>=0.27.0",
         "bitsandbytes>=0.43.0",
         "safetensors>=0.4.0",
+        "sentencepiece>=0.2.0",
+        "peft>=0.10.0",
         extra_index_url="https://download.pytorch.org/whl/cu124",
     )
-    .add_local_dir(MERGED_MODEL_DIR, remote_path="/model")
 )
 
 
 @app.cls(
     image=image,
     gpu="L4",
+    volumes={ADAPTER_PATH: model_volume},
     scaledown_window=60,
     timeout=120,
 )
@@ -44,6 +52,7 @@ class JasminModel:
     @modal.enter()
     def load(self):
         import torch
+        from peft import PeftModel
         from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
         bnb_config = BitsAndBytesConfig(
@@ -54,15 +63,18 @@ class JasminModel:
         )
 
         print("Loading tokenizer…")
-        self.tokenizer = AutoTokenizer.from_pretrained("/model")
+        self.tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
         self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        print("Loading merged model…")
-        self.model = AutoModelForCausalLM.from_pretrained(
-            "/model",
+        print("Loading base model…")
+        base = AutoModelForCausalLM.from_pretrained(
+            BASE_MODEL,
             quantization_config=bnb_config,
             device_map="auto",
         )
+
+        print("Applying LoRA adapter…")
+        self.model = PeftModel.from_pretrained(base, ADAPTER_PATH)
         self.model.eval()
         print("✅ Ready")
 
