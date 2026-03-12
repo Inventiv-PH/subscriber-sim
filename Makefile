@@ -59,7 +59,7 @@ $(STAMP):
 	$(VENV_PY) -m pip install --quiet --upgrade pip
 	$(VENV_PY) -m pip install --quiet mlx-lm
 	@printf "$(YELLOW)Installing Streamlit app deps…$(NC)\n"
-	$(VENV_PY) -m pip install --quiet -r app_requirements.txt
+	$(VENV_PY) -m pip install --quiet -r arequirements.txt
 	@touch $(STAMP)
 	@printf "$(GREEN)✅ Setup complete$(NC)\n"
 
