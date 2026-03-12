@@ -14,7 +14,7 @@ import modal
 
 app  = modal.App("jasmin-inference")
 
-ADAPTER_DIR = Path(__file__).parent.parent / "models" / "adapter"
+MERGED_MODEL_DIR = Path(__file__).parent.parent / "models" / "merged-16bit"
 
 image = (
     modal.Image.from_registry(
@@ -24,24 +24,18 @@ image = (
     .pip_install(
         "torch>=2.4.0",
         "transformers>=4.40.0",
-        "peft>=0.10.0",
         "accelerate>=0.27.0",
         "bitsandbytes>=0.43.0",
         "safetensors>=0.4.0",
         extra_index_url="https://download.pytorch.org/whl/cu124",
     )
-    .add_local_dir(ADAPTER_DIR, remote_path="/adapter")
+    .add_local_dir(MERGED_MODEL_DIR, remote_path="/model")
 )
-
-volume = modal.Volume.from_name("jasmin-model-cache", create_if_missing=True)
-MODEL_CACHE = "/cache"
-BASE_MODEL  = "unsloth/Meta-Llama-3.1-8B-Instruct-bnb-4bit"
 
 
 @app.cls(
     image=image,
     gpu="L4",
-    volumes={MODEL_CACHE: volume},
     scaledown_window=60,
     timeout=120,
 )
@@ -50,7 +44,6 @@ class JasminModel:
     @modal.enter()
     def load(self):
         import torch
-        from peft import PeftModel
         from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
         bnb_config = BitsAndBytesConfig(
@@ -61,21 +54,15 @@ class JasminModel:
         )
 
         print("Loading tokenizer…")
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            BASE_MODEL, cache_dir=MODEL_CACHE
-        )
+        self.tokenizer = AutoTokenizer.from_pretrained("/model")
         self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        print("Loading 4-bit base model…")
-        base = AutoModelForCausalLM.from_pretrained(
-            BASE_MODEL,
+        print("Loading merged model…")
+        self.model = AutoModelForCausalLM.from_pretrained(
+            "/model",
             quantization_config=bnb_config,
             device_map="auto",
-            cache_dir=MODEL_CACHE,
         )
-
-        print("Applying LoRA adapter…")
-        self.model = PeftModel.from_pretrained(base, "/adapter")
         self.model.eval()
         print("✅ Ready")
 

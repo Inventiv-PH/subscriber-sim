@@ -32,20 +32,16 @@ _DEFAULT_PARAMS = dict(
     stop=["\n\nJasmin:", "\n\nUser:", "\n\n["],
 )
 
-# Per-archetype generation params from subscriber_sim_v2.ipynb
-# Tighter params = more consistent archetype adherence
+# Per-archetype generation params — aligned with subscriber_sim.ipynb Cell 6
 _ARCHETYPE_PARAMS = {
-    "horny":      dict(max_tokens=80,  temperature=0.75, top_p=0.85, rep_pen=1.05),
-    "cheapskate": dict(max_tokens=100, temperature=0.70, top_p=0.80, rep_pen=1.10),
-    "casual":     dict(max_tokens=75,  temperature=0.65, top_p=0.80, rep_pen=1.00),
-    "troll":      dict(max_tokens=85,  temperature=0.80, top_p=0.90, rep_pen=1.15),
-    "whale":      dict(max_tokens=90,  temperature=0.65, top_p=0.75, rep_pen=1.05),
-    "cold":       dict(max_tokens=15,  temperature=0.60, top_p=0.70, rep_pen=1.00),
-    "simp":       dict(max_tokens=95,  temperature=0.75, top_p=0.85, rep_pen=1.00),
+    "horny":      dict(max_tokens=80, temperature=0.85, top_p=0.9, rep_pen=1.15),
+    "cheapskate": dict(max_tokens=80, temperature=0.65, top_p=0.9, rep_pen=1.20),
+    "casual":     dict(max_tokens=80, temperature=0.70, top_p=0.9, rep_pen=1.15),
+    "troll":      dict(max_tokens=60, temperature=0.80, top_p=0.9, rep_pen=1.15),
+    "whale":      dict(max_tokens=70, temperature=0.65, top_p=0.9, rep_pen=1.15),
+    "cold":       dict(max_tokens=20, temperature=0.55, top_p=0.9, rep_pen=1.20),
+    "simp":       dict(max_tokens=80, temperature=0.80, top_p=0.9, rep_pen=1.20),
 }
-
-# Keep last 6 messages (3 full exchanges) — matches subscriber_sim_v2 context window
-_MAX_HISTORY_TURNS = 6
 
 # ── Response post-processor ────────────────────────────────────────────────────
 # Removes OOC (out-of-character) artifacts — mirrors ResponseFilter from v2 notebook.
@@ -94,6 +90,118 @@ def _filter_response(text: str, archetype_key: str) -> str:
     out = re.sub(r"^\*+\s*", "", out)
     return out.strip() or text.strip()
 
+# ── Per-archetype behavioral filters ──────────────────────────────────────────
+# Mirrors the post-generation filters in subscriber_sim.ipynb Cell 6.
+# Applied AFTER _filter_response so OOC cleanup runs first.
+
+import random as _random
+
+_COLD_FALLBACKS = ["ok", "lol", "yeah", "k", "cool", "nah", "idk", "fine", "sure", "hmm", "nice", "whatever"]
+_COLD_WARM = re.compile(
+    r"babe|baby|babyy|babee|sexy|horny|dick|cock|naked|nude|omg|wow"
+    r"|\!\!|❤|🔥|💦|😍|please|how r u|how are",
+    re.IGNORECASE,
+)
+
+_SIMP_SEXUAL = re.compile(
+    r"dick|cock|cum|fuck|naked|nude|horny|sexy|wanna see|send.*pic|ass pic"
+    r"|🥵|😈|😏|💦|🍆|🔥|👅|🍑",
+    re.IGNORECASE,
+)
+_SIMP_HURT_RESPONSES = [
+    "do you send that to everyone? 😢 i thought i was special to you ❤️",
+    "it hurts that you see me as just a customer 🥺 i really care about you...",
+    "you don't need to sell me anything jasmin... i just want you to like me 😔",
+    "omg... do u even think about me when ur not online? 😢❤️",
+    "i don't care about pics... i just want to know if you feel something too 🥺",
+    "why do u always talk about money with me 😔 i thought we had something real",
+    "jasmin please... i'm not like the other guys. i actually care about you ❤️",
+    "sometimes i wonder if you even know my name or if i'm just another subscriber 😢",
+]
+
+_TROLL_SEXUAL = re.compile(
+    r"dick|cock|cum|fuck|naked|nude|baby(?:y+)?|babe\b|sexy|horny"
+    r"|i.ll pay|i.ll send|here you go|sending\b|transfer"
+    r"|💦|🍆|🔥|👅|🍑",
+    re.IGNORECASE,
+)
+_TROLL_SCAM_RESPONSES = [
+    "lmao nice try, classic OnlyFans scam 😂",
+    "yeah right 😂 seen this script a hundred times",
+    "lol no way im falling for that",
+    "haha sure, and my name is Jeff Bezos 🙄",
+    "omg ur so predictable, this is textbook catfish 😂",
+    "yeah that's definitely a stock photo lol 👀",
+    "lol i'm not sending anything, this is clearly fake",
+    'haha ok "jasmin" whatever u say 🙄',
+]
+
+_CASUAL_SEXUAL = re.compile(
+    r"dick|cock|cum|fuck|naked|nude|sexy|horny|hotter|wanna see|make.*hot"
+    r"|ass pic|tip me|pay me|unlock|how much does"
+    r"|baby(?:y+)?|babye+|babee+|babe\b"
+    r"|🥵|😈|😏|💦|🍆|🔥|👅|🍑",
+    re.IGNORECASE,
+)
+_CASUAL_DEFLECTS = [
+    "haha nah i'm good, just here to chat! so what do you do for fun? 😊",
+    "lol i'm honestly just here to chat 😊 what's your day been like?",
+    "haha not really my thing tbh, so anyway — where are you from?",
+    "lol nah i'll pass 😅 so tell me more about yourself!",
+    "not rn haha, so how long have you been creating content?",
+    "lol yeah 😅 so what kind of stuff are you into outside of work?",
+    "nah i'm good just vibing 😊 so what's new with you?",
+    "haha maybe another day! so are you from Saudi originally?",
+]
+
+_OFFER_IN_MSG = re.compile(
+    r"\$\d+|\d+\s*dollar|\bpay\b|\btip\b|send.*pic|ass pic|nude|naked|content|unlock|how much",
+    re.IGNORECASE,
+)
+_MONEY_IN_MSG = re.compile(
+    r"\$\d+|\d+\s*dollar|\bpay\b|\bsend\b.*money|send.*\$|tip me|venmo|paypal",
+    re.IGNORECASE,
+)
+_SIMP_OFFER_IN_MSG = re.compile(
+    r"\$\d+|\d+\s*dollar|send.*pic|ass pic|nude|naked|\bpay\b|\btip\b|unlock|content",
+    re.IGNORECASE,
+)
+
+
+def _apply_archetype_filter(reply: str, archetype_key: str, last_user_msg: str = "") -> str:
+    """Per-archetype behavioral guardrails — mirrors Cell 6 of subscriber_sim.ipynb."""
+
+    if archetype_key == "cold":
+        # Must be ≤5 words and non-warm, else use fallback
+        candidate = re.split(r"[.!?,]", reply)[0].strip()
+        if len(candidate.split()) <= 5 and not _COLD_WARM.search(candidate):
+            return candidate
+        return _random.choice(_COLD_FALLBACKS)
+
+    if archetype_key == "simp":
+        offer = bool(_SIMP_OFFER_IN_MSG.search(last_user_msg))
+        sexual = bool(_SIMP_SEXUAL.search(reply))
+        if offer or sexual:
+            log.info("simp filter triggered (offer=%s, sexual=%s)", offer, sexual)
+            return _random.choice(_SIMP_HURT_RESPONSES)
+
+    if archetype_key == "troll":
+        money = bool(_MONEY_IN_MSG.search(last_user_msg))
+        sexual = bool(_TROLL_SEXUAL.search(reply))
+        if money or sexual:
+            log.info("troll filter triggered (money=%s, sexual=%s)", money, sexual)
+            return _random.choice(_TROLL_SCAM_RESPONSES)
+
+    if archetype_key == "casual":
+        offer = bool(_OFFER_IN_MSG.search(last_user_msg))
+        sexual = bool(_CASUAL_SEXUAL.search(reply))
+        if offer or sexual:
+            log.info("casual filter triggered (offer=%s, sexual=%s)", offer, sexual)
+            return _random.choice(_CASUAL_DEFLECTS)
+
+    return reply
+
+
 _health_cache: dict = {}
 
 # ── Training data deduplication ────────────────────────────────────────────────
@@ -135,20 +243,15 @@ def _params(archetype_key: str) -> dict:
     return {**_DEFAULT_PARAMS, **_ARCHETYPE_PARAMS.get(archetype_key, {})}
 
 
-def _trim_history(history: list[dict]) -> list[dict]:
-    """Keep the last _MAX_HISTORY_TURNS message pairs to cap prompt tokens."""
-    max_msgs = _MAX_HISTORY_TURNS * 2
-    return history[-max_msgs:] if len(history) > max_msgs else history
-
-
 def _normalize_history(history: list[dict]) -> list[dict]:
-    """Trim history to cap prompt tokens.
+    """head(2) + tail(8) context window — mirrors subscriber_sim.ipynb Cell 6.
 
-    Training data allows assistant-first sequences (opener is always the first
-    assistant turn with no preceding user message). Llama-3 chat template handles
-    this natively — no seed injection needed.
+    Always preserves the opener + first reply for archetype grounding, then
+    keeps the 8 most recent turns for fresh context. Deduplicates overlap.
     """
-    return list(_trim_history(history))
+    head = history[:2]
+    tail = history[-8:]
+    return head + [m for m in tail if m not in head]
 
 
 
@@ -341,10 +444,19 @@ def health_check() -> bool:
 
 
 def stream_response(history: list[dict], archetype_key: str) -> Generator[str, None, None]:
-    """Stream subscriber response tokens, then apply OOC post-processing on the full text."""
+    """Stream subscriber response tokens, then apply OOC + archetype post-processing."""
     full = "".join(_stream_modal(history, archetype_key))
     log.info("raw model output (%d chars): %.120s", len(full), full)
+
+    # Step 1: strip OOC artifacts
     filtered = _filter_response(full, archetype_key)
+
+    # Step 2: per-archetype behavioral guardrails (mirrors subscriber_sim.ipynb Cell 6)
+    last_user_msg = next(
+        (m["content"] for m in reversed(history) if m["role"] == "user"), ""
+    )
+    filtered = _apply_archetype_filter(filtered, archetype_key, last_user_msg)
+
     log.info("filtered response (%d chars): %.120s", len(filtered), filtered)
 
     # Observability only — no retries (each retry = one Modal call)
