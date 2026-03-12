@@ -17,7 +17,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 # ── Paths ───────────────────────────────────────────────────────────────
-CHAT_DIR = Path(__file__).resolve().parent.parent / "chat data"
+CHAT_DIR = Path(__file__).resolve().parent.parent / "chat_data"
 OUTPUT_DIR = Path(__file__).resolve().parent.parent / "data"
 
 # ── File → subscriber label mapping (from manual analysis) ──────────────
@@ -194,11 +194,19 @@ _RE_HORNY = re.compile(
     re.IGNORECASE,
 )
 _RE_CHEAP = re.compile(
-    r"(cheap|discount|free|too much|expensive|afford|half price|deal|lower|less)",
+    r"(cheap|discount|free|too much|expensive|afford|half price|deal|lower|less|"
+    r"how much|what price|can i get|can you do|can.t afford|"
+    r"loyal|always tip|always pay|tip later|next time|later|"
+    r"other creators|other girls|someone else charges|"
+    r"aud|usd|currency|not fair|mad at|been looking)",
     re.IGNORECASE,
 )
 _RE_CASUAL = re.compile(
-    r"(how are you|your day|life|interests|tell me about|where .* from|culture)",
+    r"(how are you|your day|life|interests|tell me about|where .* from|culture|"
+    r"what about you|what do you|do you like|do you think|"
+    r"interested in|curious|tell me more|opinion|thoughts|"
+    r"how.s your|how was your|nice to meet|get along|"
+    r"where are you|what are you into|what.s your)",
     re.IGNORECASE,
 )
 _RE_TROLL = re.compile(
@@ -206,11 +214,20 @@ _RE_TROLL = re.compile(
     re.IGNORECASE,
 )
 _RE_WHALE = re.compile(
-    r"(money.s not|take my money|premium|exclusive|vip|tip.*\d{2,}|whatever.*cost)",
+    r"(money.s not|take my money|whatever.*cost|"
+    r"tip.*\d{2,}|\d{2,}.*tip|sent.*tip|i sent you|"
+    r"just send|send it over|no problem|not an issue|"
+    r"premium|exclusive|vip|"
+    r"i can handle|i.ll pay|i.ll take it|i.ll buy)",
     re.IGNORECASE,
 )
 _RE_SIMP = re.compile(
-    r"(love you|beautiful|perfect|gorgeous|amazing|angel|queen|❤|🥰|💕|miss you|think about you)",
+    r"(love you|beautiful|perfect|gorgeous|amazing|angel|queen|"
+    r"i love|i adore|i need you|obsessed|can.t get enough|"
+    r"miss you|missing you|thinking of|dreaming of|"
+    r"jealous|only for you|only you|forever|real relationship|"
+    r"you.re the only|special to me|care about you|"
+    r"❤|🥰|💕|😍|💗|😘|🥺)",
     re.IGNORECASE,
 )
 
@@ -295,17 +312,17 @@ def classify_archetype(messages: list[dict]) -> str:
     avg_len = sum(len(m) for m in sub_msgs) / max(len(sub_msgs), 1)
 
     scores = {
-        "horny": len(_RE_HORNY.findall(all_text)),
+        "horny":      len(_RE_HORNY.findall(all_text)) * 2,
         "cheapskate": len(_RE_CHEAP.findall(all_text)) * 3,
-        "casual": len(_RE_CASUAL.findall(all_text)) * 2,
-        "troll": len(_RE_TROLL.findall(all_text)) * 3,
-        "whale": len(_RE_WHALE.findall(all_text)) * 3,
-        "cold": 5 if avg_len < 15 and len(sub_msgs) >= 3 else 0,
-        "simp": len(_RE_SIMP.findall(all_text)) * 2,
+        "casual":     len(_RE_CASUAL.findall(all_text)) * 3,
+        "troll":      len(_RE_TROLL.findall(all_text)) * 3,
+        "whale":      len(_RE_WHALE.findall(all_text)) * 4,
+        "cold":       5 if avg_len < 15 and len(sub_msgs) >= 3 else 0,
+        "simp":       len(_RE_SIMP.findall(all_text)) * 3,
     }
 
     best = max(scores, key=scores.get)
-    return best if scores[best] > 0 else "horny"
+    return best if scores[best] > 0 else "casual"
 
 
 # ── Line classification ─────────────────────────────────────────────────
