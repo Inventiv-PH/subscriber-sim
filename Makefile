@@ -93,9 +93,8 @@ build:
 	docker build -t jasmin-chat .
 	@printf "$(GREEN)✅ Image built$(NC)\n"
 
-up: convert
+up:
 	@printf "$(GREEN)Starting Streamlit app via Docker on http://localhost:8501$(NC)\n"
-	@printf "$(YELLOW)Make sure MLX server is running (make server in another terminal).$(NC)\n\n"
 	docker compose up --build
 
 down:

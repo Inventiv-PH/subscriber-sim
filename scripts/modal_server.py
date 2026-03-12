@@ -17,9 +17,10 @@ app = modal.App("jasmin-inference")
 BASE_MODEL = "unsloth/meta-llama-3.1-8b-instruct-bnb-4bit"
 
 # Modal Volume — upload adapter once with:
-#   modal volume put jasmin-model models/adapter/ /adapter/
+#   modal volume put jasmin-model models/lora-adapter/ /mnt/jasmin/
 model_volume = modal.Volume.from_name("jasmin-model", create_if_missing=True)
-ADAPTER_PATH = "/adapter"
+VOLUME_MOUNT = "/mnt/jasmin"
+ADAPTER_PATH = "/mnt/jasmin/lora-adapter"
 
 image = (
     modal.Image.from_registry(
@@ -28,8 +29,8 @@ image = (
     )
     .pip_install(
         "torch>=2.4.0",
-        "transformers>=4.40.0",
-        "tokenizers>=0.19.0",
+        "transformers>=4.40.0,<5.0.0",
+        "tokenizers>=0.19.0,<0.21.0",
         "accelerate>=0.27.0",
         "bitsandbytes>=0.43.0",
         "safetensors>=0.4.0",
@@ -43,7 +44,7 @@ image = (
 @app.cls(
     image=image,
     gpu="L4",
-    volumes={ADAPTER_PATH: model_volume},
+    volumes={VOLUME_MOUNT: model_volume},
     scaledown_window=60,
     timeout=120,
 )
@@ -53,7 +54,7 @@ class JasminModel:
     def load(self):
         import torch
         from peft import PeftModel
-        from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+        from transformers import AutoModelForCausalLM, BitsAndBytesConfig, PreTrainedTokenizerFast
 
         bnb_config = BitsAndBytesConfig(
             load_in_4bit=True,
@@ -63,8 +64,14 @@ class JasminModel:
         )
 
         print("Loading tokenizer…")
-        self.tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
-        self.tokenizer.pad_token = self.tokenizer.eos_token
+        self.tokenizer = PreTrainedTokenizerFast(
+            tokenizer_file=f"{ADAPTER_PATH}/tokenizer.json",
+            bos_token="<|begin_of_text|>",
+            eos_token="<|eot_id|>",
+            pad_token="<|eot_id|>",
+        )
+        with open(f"{ADAPTER_PATH}/chat_template.jinja") as f:
+            self.tokenizer.chat_template = f.read()
 
         print("Loading base model…")
         base = AutoModelForCausalLM.from_pretrained(
@@ -88,11 +95,11 @@ class JasminModel:
         text = self.tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
-        # Append prefill text directly after the generation prompt header so
-        # the model is forced to continue from an in-character seed token.
         if prefill:
             text += prefill
-        inputs = self.tokenizer(text, return_tensors="pt").to(self.model.device)
+        inputs = {k: v for k, v in self.tokenizer(text, return_tensors="pt").items()
+                  if k != "token_type_ids"}
+        inputs = {k: v.to(self.model.device) for k, v in inputs.items()}
 
         # Short replies: skip thread+streamer overhead, generate synchronously
         if max_tokens <= 70:

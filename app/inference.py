@@ -5,6 +5,7 @@ from collections.abc import Callable, Generator
 
 from archetypes import (
     ARCHETYPES,
+    _ARCHETYPE_MANDATES,
     _SUBSCRIBER_SYSTEMS,
     get_archetype_loop_break,
     get_archetype_mid_convo_reminder,
@@ -306,7 +307,9 @@ def _stream_modal(history: list[dict], archetype_key: str) -> Generator[str, Non
         chat = [{"role": m["role"], "content": m["content"]} for m in normalized]
         looping = _is_looping(chat)
         chat = _inject_mid_convo_reminder(chat, archetype_key, looping=looping)
-        system = _SUBSCRIBER_SYSTEMS.get(archetype_key, _SUBSCRIBER_SYSTEMS["casual"])
+        base = _SUBSCRIBER_SYSTEMS.get(archetype_key, _SUBSCRIBER_SYSTEMS["casual"])
+        mandate = _ARCHETYPE_MANDATES.get(archetype_key, "")
+        system = base + ("\n\n" + mandate if mandate else "")
         messages = [{"role": "system", "content": system}] + chat
         p = _params(archetype_key)
         if looping:
@@ -384,11 +387,7 @@ def _generate_opener_modal(archetype_key: str) -> str:
     """
     try:
         model = _get_modal_model()
-        # Use the same bare system prompt as training — no role declarations,
-        # no few-shots, no TASK directives. Distribution shift kills archetype fidelity.
         system = _SUBSCRIBER_SYSTEMS.get(archetype_key, _SUBSCRIBER_SYSTEMS["casual"])
-        # System-only: model generates the first assistant turn with no preceding
-        # user message — matches the training format exactly.
         messages = [{"role": "system", "content": system}]
         p = _params(archetype_key)
         log.info("── dynamic opener [%s] ── system: %d chars", archetype_key, len(system))
